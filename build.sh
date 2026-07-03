@@ -101,9 +101,16 @@ echo -e "${YELLOW}Injecting payload...${NC}"
 
 echo
 
+FW_PY="./.venv/bin/python3"
+[ -x "$FW_PY" ] || FW_PY="python3"
+SIGNED_BOOTLOADER="${DEVICE_LOWER}-fenrir-signed.bin"
 if [ -f "${DEVICE_LOWER}-fenrir.bin" ]; then
+   echo -e "${YELLOW}Re-signing patched bootloader...${NC}"
+   "$FW_PY" -c "import sys; sys.path.insert(0, 'injector'); import fw_sign; fw_sign.sign_image(sys.argv[1], sys.argv[2])" "${DEVICE_LOWER}-fenrir.bin" "$SIGNED_BOOTLOADER" || {
+       echo -e "${RED}Bootloader re-sign failed${NC}"; exit 1; }
    echo -e "${GREEN}Operation completed successfully!${NC}"
    echo -e "${WHITE}Patched bootloader saved as: ${BOLD}${DEVICE_LOWER}-fenrir.bin${NC}"
+   echo -e "${WHITE}Signed bootloader saved as: ${BOLD}${SIGNED_BOOTLOADER}${NC}"
 else
     echo -e "${RED}Injection failed or output file not found!${NC}"
     exit 1
@@ -113,8 +120,6 @@ if [ "$DO_FIRMWARE" -eq 1 ]; then
     echo
     echo -e "${YELLOW}Running EXPERIMENTAL firmware-partition OC (--firmware)...${NC}"
     echo -e "${YELLOW}  UNVERIFIED per silicon — flash & verify on-device.${NC}"
-    FW_PY="./.venv/bin/python3"
-    [ -x "$FW_PY" ] || FW_PY="python3"
     "$FW_PY" injector/patch_firmware.py "$DEVICE" || {
         echo -e "${RED}Firmware OC step failed${NC}"; exit 1; }
 fi
