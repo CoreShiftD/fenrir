@@ -1,5 +1,7 @@
 # MT6789 (fenrir) CPU overclock chain — full map
 
+Personal fork notes. OC reference material credited to [@raffprjkt](https://t.me/raffprjkt).
+
 End-to-end trace of where CPU frequency is controlled on this device, so the OC
 knobs (and non-knobs) are unambiguous. Companion to `PI_IMG_KRAKEN_NOTES.md`
 (the aging/EEMSN ceiling) and the two patchers `mcupm_devices.py` /
@@ -164,7 +166,7 @@ Same record shape found in mcupm's `[C]` table (§ mcupm_devices.py [C]) and in
 
 ### 6b. Signing / cert requirements per partition (verified)
 All three CPU-DVFS images are GFH-wrapped and RSA cert2-signed, and all load +
-re-sign cleanly through `liblk` + `lkpatcher.cert_bypass`:
+re-sign cleanly through `liblk` + fenrir's local `cert_bypass`:
 
 | image | fwid | cert1/cert2 | note |
 |---|---|---|---|
@@ -180,7 +182,7 @@ therefore requires adding a re-sign step (shared `fw_sign.py`). As with pi_img,
 
 | file | role |
 |---|---|
-| `injector/fw_sign.py` | shared `liblk`+`cert_bypass` re-sign (`sign_image`, OVERRIDE default, WRAP fallback) |
+| `injector/fw_sign.py` | shared `liblk`+local `cert_bypass` re-sign (`sign_image`, OVERRIDE default, WRAP fallback) |
 | `injector/mcupm_devices.py` | `--minfreq-lit <MHz>` (rewrites `500000`×4 in `[C]`) + `--sign` |
 | `injector/sspm_devices.py` | NEW: `--minfreq-lit <MHz>` (`500000`×8) / `--minfreq-big <MHz>` (`725000`×7) + `--sign` |
 | `injector/pi_img_devices.py` | existing; `--set`/`--set-reg` + `--write` (always re-signs) |

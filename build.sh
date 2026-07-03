@@ -106,7 +106,7 @@ FW_PY="./.venv/bin/python3"
 SIGNED_BOOTLOADER="${DEVICE_LOWER}-fenrir-signed.bin"
 if [ -f "${DEVICE_LOWER}-fenrir.bin" ]; then
    echo -e "${YELLOW}Re-signing patched bootloader...${NC}"
-   "$FW_PY" -c "import sys; sys.path.insert(0, 'injector'); import fw_sign; fw_sign.sign_image(sys.argv[1], sys.argv[2])" "${DEVICE_LOWER}-fenrir.bin" "$SIGNED_BOOTLOADER" || {
+   "$FW_PY" injector/fw_sign.py "${DEVICE_LOWER}-fenrir.bin" "$SIGNED_BOOTLOADER" || {
        echo -e "${RED}Bootloader re-sign failed${NC}"; exit 1; }
    echo -e "${GREEN}Operation completed successfully!${NC}"
    echo -e "${WHITE}Patched bootloader saved as: ${BOLD}${DEVICE_LOWER}-fenrir.bin${NC}"

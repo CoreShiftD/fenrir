@@ -20,7 +20,7 @@ flashing and reading `cpuinfo_min_freq` / `scaling_available_frequencies`.
 Every knob defaults to stock (no-op). See CPU_OC_CHAIN_NOTES.md.
 
 Two-gate note: sspm is GFH/cert2-signed like mcupm/pi_img. `--sign` re-forges
-cert2 via fw_sign (lkpatcher.cert_bypass). On an unlocked device a raw edit
+cert2 via fw_sign (local cert_bypass). On an unlocked device a raw edit
 already boots; signing is for consistency / locked units. On-device cert
 acceptance is UNTESTED (PI_IMG_KRAKEN_NOTES.md §4c/§6d).
 

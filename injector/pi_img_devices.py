@@ -13,7 +13,7 @@ threshold — is driven from this data. Full analysis: PI_IMG_KRAKEN_NOTES.md.
 ════════════════════════════════════════════════════════════════════
   1. Outer MTK GFH / cert2 RSA signature (REAL cryptography). Any payload
      edit invalidates it → the device rejects the image. Bypassed by forging
-     a cert2 the verifier accepts, via lkpatcher.cert_bypass (OVERRIDE/WRAP).
+     a cert2 the verifier accepts, via the local cert_bypass helper (OVERRIDE/WRAP).
      This tool ALWAYS re-signs on --write.
   2. Inner KRAKEN cookie 0x17C3A6B4 at payload[0] and payload[-4] (not crypto).
      Must stay byte-identical AND at the same relative offset. Therefore every
@@ -72,11 +72,13 @@ import argparse
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
 
-# liblk / lkpatcher live outside this repo; make them importable.
-sys.path.insert(0, '/opt/src/lkpatcher')
+# liblk comes from requirements.txt; cert_bypass is local to injector/.
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
 try:
     from liblk.image import LkImage
-    from lkpatcher.cert_bypass import apply_cert_bypass, CertBypassMode
+    from cert_bypass import apply_cert_bypass
     _HAVE_LIBLK = True
     _IMPORT_ERR = None
 except Exception as e:                       # pragma: no cover - env dependent
@@ -262,10 +264,10 @@ def write(img, part, payload: bytearray, out_path: str, wrap: bool = False):
         sys.exit(f"ERROR: refusing to write — payload length changed "
                  f"({len(part.data)} -> {len(payload)}); KRAKEN footer offset must stay fixed")
     part.data = bytes(payload)
-    mode = CertBypassMode.WRAP if wrap else CertBypassMode.OVERRIDE
-    apply_cert_bypass(img, mode=mode)
+    mode = 'WRAP' if wrap else 'OVERRIDE'
+    apply_cert_bypass(img, wrap=wrap)
     img.save(out_path)
-    print(f"\nre-signed (cert2 {mode.name}) and wrote: {out_path}")
+    print(f"\nre-signed (cert2 {mode}) and wrote: {out_path}")
     print("NOTE: forged cert2 is UNTESTED on-device — see PI_IMG_KRAKEN_NOTES.md §6d.")
 
 

@@ -164,7 +164,7 @@ STOCK_TABLE = [
     ( 390000, 67500, 75000, 2,  625, 0),
 ]
 
-# OC reference curve — used for default ceil/volt and voltage shape
+# OC reference curve credited to @raffprjkt; used for default ceil/volt and voltage shape
 OC_TABLE = [
     (1200000, 80000, 80000, 1, 1875, 0),
     (1186000, 79375, 79375, 1, 1875, 0),

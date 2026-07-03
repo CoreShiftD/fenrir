@@ -1,59 +1,85 @@
 """
-fw_sign.py — shared MTK GFH/cert2 re-sign helper for fenrir firmware patchers.
+fw_sign.py - shared MTK GFH/cert2 re-sign helper.
 
-Wraps liblk + lkpatcher.cert_bypass so mcupm_devices.py, sspm_devices.py,
-pi_img_devices.py and patch_firmware.py all re-sign modified partition images
-the same way ("cert every modification").
-
-EXPERIMENTAL: cert_bypass forges a cert2 that MTK's parser accepts structurally
-(prepend a [0] hash-override ahead of the untouched original), but ON-DEVICE
-acceptance at boot is UNTESTED — see PI_IMG_KRAKEN_NOTES.md §4c/§6d. On an
-unlocked device that does not enforce the partition signature, an unsigned raw
-edit already boots (proven for mcupm); signing is for consistency / locked units.
-
-Requires the liblk venv:  /opt/src/fenrir/.venv/bin/python3
-Override the lkpatcher location with env LKPATCHER_PATH if needed.
+Uses fenrir's local liblk-based cert_bypass implementation so bootloader and
+firmware images are signed through the same path as the upstream injector.
 """
+from __future__ import annotations
+
+import argparse
 import os
 import sys
+from typing import Optional
 
-LKPATCHER_PATH = os.environ.get('LKPATCHER_PATH', '/opt/src/lkpatcher')
-if LKPATCHER_PATH not in sys.path:
-    sys.path.insert(0, LKPATCHER_PATH)
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
 
 
 def have_liblk() -> bool:
-    """True if liblk + lkpatcher.cert_bypass are importable in this interpreter."""
+    """True if liblk and fenrir's local cert_bypass are importable."""
     try:
-        import liblk.image                 # noqa: F401
-        import lkpatcher.cert_bypass        # noqa: F401
+        import liblk.image  # noqa: F401
+        import cert_bypass  # noqa: F401
         return True
     except Exception:
         return False
 
 
-def require_liblk():
+def require_liblk() -> None:
     if not have_liblk():
         sys.exit(
-            "ERROR: liblk/lkpatcher not importable — run under the venv:\n"
-            "  /opt/src/fenrir/.venv/bin/python3 <tool> ...\n"
-            "  (or set LKPATCHER_PATH / pip install liblk in the venv)")
+            "ERROR: liblk/cert_bypass not importable - install requirements:\n"
+            "  pip install -r requirements.txt\n"
+            "or run under the repo venv:\n"
+            "  /opt/src/fenrir/.venv/bin/python3 <tool> ..."
+        )
 
 
-def sign_image(path: str, out_path: str = None, wrap: bool = False) -> str:
-    """Load a GFH partition image whose payload was already edited on disk,
-    forge a fresh cert2, and save. In-place when out_path is None.
+def _compute_trailing(img) -> bytes:
+    region_end = 0
+    for partition in img.partitions.values():
+        region_end = max(region_end, partition.end_offset)
+        for cert in partition.certs:
+            region_end = max(region_end, cert.end_offset)
+    return bytes(img.contents[region_end:])
 
-    liblk parses the GFH structure (no RSA verification on load), so an image
-    with a now-stale cert2 loads fine; cert_bypass then replaces cert2 for the
-    current payload. Returns the written path.
+
+def sign_image(path: str, out_path: Optional[str] = None, wrap: bool = False) -> str:
+    """Re-sign modified GFH partitions in an LK/GFH image.
+
+    Only partitions whose cert2 no longer matches their current contents are
+    touched. Returns the written path.
     """
     require_liblk()
     from liblk.image import LkImage
-    from lkpatcher.cert_bypass import apply_cert_bypass, CertBypassMode
+    from cert_bypass import apply_cert_bypass
+
     out_path = out_path or path
     img = LkImage(path)
-    mode = CertBypassMode.WRAP if wrap else CertBypassMode.OVERRIDE
-    apply_cert_bypass(img, mode=mode)
-    img.save(out_path)
+    trailing = _compute_trailing(img)
+    signed = apply_cert_bypass(img, trailing, wrap=wrap)
+
+    if not signed:
+        img._rebuild_contents()
+        img.contents = bytearray(img.contents) + bytearray(trailing)
+
+    with open(out_path, 'wb') as f:
+        f.write(bytes(img.contents))
     return out_path
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description='Re-sign modified GFH/cert2 images')
+    parser.add_argument('image', help='Input image path')
+    parser.add_argument('output', nargs='?', help='Output path (default: in-place)')
+    parser.add_argument('--wrap', action='store_true', help='Use WRAP cert2 mode')
+    args = parser.parse_args()
+
+    out = sign_image(args.image, args.output, wrap=args.wrap)
+    print('Signed: %s' % out)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

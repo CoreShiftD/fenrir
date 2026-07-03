@@ -2,6 +2,9 @@
 
 **Language:** [日本語](README_ja-JP.md)
 
+> [!NOTE]
+> This is CoreShiftD's personal fork of [R0rt1z2/fenrir](https://github.com/R0rt1z2/fenrir). It carries experimental MT6789/A75 firmware overclock work that is not upstream.
+
 This is a PoC exploit for a vulnerability in the Nothing Phone (2a) / CMF Phone 1 secure boot chain (and possibly other MediaTek devices).
 
 It abuses a logic flaw where one component isn't properly verified if the seccfg unlock state is set to unlocked.
@@ -80,9 +83,9 @@ Once you have your bootloader image ready, you can build the exploit using the p
 ./build.sh pacman /path/to/your/bootloader.bin
 ```
 
-After building, you should see a new file named `lk.patched` in the root directory. You can now flash this patched bootloader image to your device:
+After building, you should see `pacman-fenrir.bin` and `pacman-fenrir-signed.bin` (or the matching files for your device) in the root directory. The signed artifact is produced through the local `liblk`/`cert_bypass` signing path. You can flash the output image to your device:
 ```
-./flash.sh
+./flash.sh pacman-fenrir-signed.bin
 ```
 
 > [!NOTE]
@@ -103,9 +106,17 @@ The following devices are currently supported:
 | Zinwa Q25 | `Q25` |
 | Redmi K70E/POCO X6 Pro 5G | `duchamp` |
 | Redmi Turbo 4/POCO X7 Pro | `rodin` |
+| itel RS4 | `S666LN` |
+| INOI A75 (personal fork / experimental) | `A75` |
 
 > [!NOTE]
 > Support for the CMF Phone 1 (`Tetris`) is still incomplete.
+
+## Fork Documentation
+- [MT6789/A75 CPU overclock chain notes](docs/CPU_OC_CHAIN_NOTES.md)
+- [PI_IMG/KRAKEN signing and register notes](docs/PI_IMG_KRAKEN_NOTES.md)
+
+The MT6789/A75 overclock work uses OC reference material credited to [@raffprjkt](https://t.me/raffprjkt). These notes are experimental and intended for this personal fork.
 
 Adding support for a new device isn’t straightforward, but it is possible with some effort and reverse engineering. A good starting point is to check whether your phone’s `bl2_ext` partition is verified.
 

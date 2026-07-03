@@ -158,7 +158,7 @@ Don't confuse them — they need completely different fixes.
      declared length 1705 bytes) starting at absolute file offset
      **0x3330 (13104)**, running to offset 14813.
    - This is the exact same MTK GFH `cert1`+`cert2` structure that
-     `/opt/src/lkpatcher/lkpatcher/cert_bypass.py` (`liblk`'s
+     `injector/cert_bypass.py` (`liblk`'s
      `Certificate`/`LkImage.partitions[...].cert2`) already models for
      `lk.bin` partitions.
    - **This is a real RSA-signed hash you cannot recompute without the
@@ -192,13 +192,12 @@ the raw partition-read level, before KRAKEN's own cookie check ever executes.
 ## 4c. CONFIRMED WORKING — patch + re-sign pipeline (tested end-to-end)
 
 `liblk` is installed at `/opt/src/fenrir/.venv` and correctly parses
-`pi_img.bin` as a single-partition GFH image. `cert_bypass.py` from
-`/opt/src/lkpatcher` works against it unmodified. Verified working pipeline:
+`pi_img.bin` as a single-partition GFH image. The local `injector/cert_bypass.py` helper works against it. Verified working pipeline:
 
 ```python
 import sys
-sys.path.insert(0, '/opt/src/lkpatcher')
-from lkpatcher.cert_bypass import apply_cert_bypass, CertBypassMode
+sys.path.insert(0, '/opt/src/fenrir/injector')
+from cert_bypass import apply_cert_bypass
 from liblk.image import LkImage
 
 img = LkImage('/opt/src/fenrir/pi_img.bin')
@@ -213,7 +212,7 @@ data = bytearray(p.data)
 # ... edit data[4:-4] only — never touch data[:4] or data[-4:] ...
 p.data = bytes(data)
 
-apply_cert_bypass(img, mode=CertBypassMode.OVERRIDE)   # forges cert2
+apply_cert_bypass(img)   # forges cert2
 img.save('/path/to/pi_img_patched.bin')
 ```
 
@@ -401,9 +400,9 @@ pipeline** and register-shadow tooling but enables **no** cap patch by default.
 
 ### 6d. CONFIRMED patch+re-sign pipeline (used by `pi_img_devices.py`)
 
-`liblk` (`/opt/src/fenrir/.venv`) + `lkpatcher.cert_bypass` round-trip cleanly:
+`liblk` (`/opt/src/fenrir/.venv`) + local `cert_bypass` round-trip cleanly:
 - edit only `payload[4:-4]`, keep length constant (KRAKEN cookie gate), then
-- `apply_cert_bypass(img, OVERRIDE)` forges cert2 (outer GFH/RSA gate), `img.save()`.
+- `apply_cert_bypass(img)` forges cert2 (outer GFH/RSA gate), `img.save()`.
 Both gates handled; **on-device acceptance of the forged cert2 remains untested.**
 
 ## 7. EEMSN consumer trace in mcupm (RISC-V) — partial, this session

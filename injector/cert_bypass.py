@@ -29,7 +29,7 @@ def build_bypass_cert2_override(
 
 
 def apply_cert_bypass(
-    image: LkImage, trailing: Union[bytes, bytearray] = b''
+    image: LkImage, trailing: Union[bytes, bytearray] = b'', wrap: bool = False
 ) -> List[str]:
     signed: List[str] = []
 
@@ -51,9 +51,14 @@ def apply_cert_bypass(
 
         header_hash, image_hash = partition.compute_hashes()
         original = bytes(partition.cert2.data)
-        partition.cert2.data = build_bypass_cert2_override(
-            original, header_hash, image_hash
-        )
+        if wrap:
+            partition.cert2.data = build_bypass_cert2_wrap(
+                original, header_hash, image_hash
+            )
+        else:
+            partition.cert2.data = build_bypass_cert2_override(
+                original, header_hash, image_hash
+            )
 
         print("Re-signed modified partition '%s'" % name)
         signed.append(name)
