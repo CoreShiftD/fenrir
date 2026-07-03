@@ -8,6 +8,18 @@ BLUE='\033[0;34m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+# Optional opt-in: --firmware runs the EXPERIMENTAL multi-partition firmware OC
+# (mcupm/sspm/pi_img) after the bootloader inject. Strip it before positional args.
+DO_FIRMWARE=0
+POSARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --firmware) DO_FIRMWARE=1 ;;
+        *) POSARGS+=("$arg") ;;
+    esac
+done
+set -- "${POSARGS[@]}"
+
 DEVICE="${1:-pacman}"
 DEVICE_LOWER=$(echo "$DEVICE" | tr '[:upper:]' '[:lower:]')
 
@@ -17,9 +29,26 @@ else
     BOOTLOADER="bin/${DEVICE_LOWER}.bin"
 fi
 
-TOOLCHAIN_URL="https://developer.arm.com/-/media/Files/downloads/gnu/14.2.rel1/binrel/arm-gnu-toolchain-14.2.rel1-x86_64-aarch64-none-elf.tar.xz"
-TOOLCHAIN_ARCHIVE="arm-gnu-toolchain-14.2.rel1-x86_64-aarch64-none-elf.tar.xz"
-TOOLCHAIN_DIR="arm-gnu-toolchain-14.2.rel1-x86_64-aarch64-none-elf"
+HOST_ARCH="$(uname -m)"
+
+case "$HOST_ARCH" in
+    x86_64)
+        TOOLCHAIN_HOST="x86_64"
+        ;;
+    aarch64|arm64)
+        TOOLCHAIN_HOST="aarch64"
+        ;;
+    *)
+        echo -e "${RED}Unsupported host architecture: $HOST_ARCH${NC}"
+        exit 1
+        ;;
+esac
+
+TOOLCHAIN_VERSION="14.2.rel1"
+
+TOOLCHAIN_URL="https://developer.arm.com/-/media/Files/downloads/gnu/${TOOLCHAIN_VERSION}/binrel/arm-gnu-toolchain-${TOOLCHAIN_VERSION}-${TOOLCHAIN_HOST}-aarch64-none-elf.tar.xz"
+TOOLCHAIN_ARCHIVE="arm-gnu-toolchain-${TOOLCHAIN_VERSION}-${TOOLCHAIN_HOST}-aarch64-none-elf.tar.xz"
+TOOLCHAIN_DIR="arm-gnu-toolchain-${TOOLCHAIN_VERSION}-${TOOLCHAIN_HOST}-aarch64-none-elf"
 TOOLCHAIN_PATH="$(pwd)/$TOOLCHAIN_DIR/bin"
 
 if [ ! -d "$TOOLCHAIN_PATH" ]; then
@@ -78,4 +107,14 @@ if [ -f "${DEVICE_LOWER}-fenrir.bin" ]; then
 else
     echo -e "${RED}Injection failed or output file not found!${NC}"
     exit 1
+fi
+
+if [ "$DO_FIRMWARE" -eq 1 ]; then
+    echo
+    echo -e "${YELLOW}Running EXPERIMENTAL firmware-partition OC (--firmware)...${NC}"
+    echo -e "${YELLOW}  UNVERIFIED per silicon — flash & verify on-device.${NC}"
+    FW_PY="./.venv/bin/python3"
+    [ -x "$FW_PY" ] || FW_PY="python3"
+    "$FW_PY" injector/patch_firmware.py "$DEVICE" || {
+        echo -e "${RED}Firmware OC step failed${NC}"; exit 1; }
 fi

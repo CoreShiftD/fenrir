@@ -2,6 +2,48 @@ from device import Device
 from stage import PayloadStage, PatchStage
 from patch_utils import MatchMode
 
+def firmware_config(mcupm=None, sspm=None, pi_img=None, gpufreq=None):
+    cfg = {
+        'mcupm': {
+            'big': None,                   # BIG max OPP MHz, stock 2200.
+            'little_opp': None,                 # LITTLE max/throttle OPP MHz, stock 750/650; maps to mcupm --floor.
+            'volt': None,                  # EEMSN voltage mV override; None = auto/stock.
+            'thermal': None,               # Thermal trip Celsius override; None = auto/stock.
+            'little': None,                # Patch DVFS timer entries; True or MHz.
+            'minfreq_lit': None,           # EXPERIMENTAL LITTLE minimum floor MHz candidate.
+            'sign': True,
+            'wrap': False,
+        },
+        'sspm': {
+            'minfreq_lit': None,           # EXPERIMENTAL LITTLE minimum floor MHz candidate.
+            'minfreq_big': None,           # EXPERIMENTAL BIG minimum floor MHz candidate.
+            'sign': True,
+            'wrap': False,
+        },
+        'pi_img': {
+            'set': [],
+            'set_reg': [],
+            'wrap': False,
+        },
+        'gpufreq': {
+            'bp': None,              # True = apply GPU bypass patches; None = skip/no-op.
+            'oc': None,              # GPU ceiling MHz; set bp=True too for full OC.
+            'volt': None,            # GPU ceiling voltage mV; requires oc.
+            'floor_volt': None,      # GPU lowest-OPP voltage mV; requires oc.
+            'offset': None,          # OPP table offset override, e.g. 0xbd10.
+            'skip': [],              # patch_gpufreq.py patch names to skip.
+        },
+    }
+    if mcupm:
+        cfg['mcupm'].update(mcupm)
+    if sspm:
+        cfg['sspm'].update(sspm)
+    if pi_img:
+        cfg['pi_img'].update(pi_img)
+    if gpufreq:
+        cfg['gpufreq'].update(gpufreq)
+    return cfg
+
 
 DEVICES = [
     Device(
@@ -118,8 +160,14 @@ DEVICES = [
                 replacement='88 00 80 52 08 00 00 b9 00 00 80 52 c0 03 5f d6',
                 match_mode=MatchMode.ALL,
                 description='Force lock state to always be LKS_LOCK',
-            ),
+            )
         },
+
+        # This is the virtual address where 'lk' (not the image but the partition)
+        # is loaded in memory. You can obtain this address by looking at the
+        # 'expdb' partition of the device, which contains boot logs.
+        base=0xFFFF000050F00000,
+        firmware=firmware_config(),
     ),
     Device(
         'PacmanPro',
@@ -161,6 +209,8 @@ DEVICES = [
                 description='Force lock state to always be LKS_LOCK',
             )
         },
+        base=0xFFFF000050F00000,
+        firmware=firmware_config(),
     ),
     Device(
         'Tetris',
@@ -195,6 +245,8 @@ DEVICES = [
                 description='Force lock state to always be LKS_LOCK',
             )
         },
+        base=0xFFFF000050700000,
+        firmware=firmware_config(),
     ),
     Device(
         'LG8n',
@@ -261,6 +313,8 @@ DEVICES = [
                 description='Prevent LK from relocking seccfg',
             ),
         },
+        base=0xFFFF000050F00000,
+        firmware=firmware_config(),
     ),
     Device(
         'LH7n',
@@ -309,6 +363,8 @@ DEVICES = [
                 description='Prevent LK from relocking seccfg',
             )
         },
+        base=0xFFFF000050F00000,
+        firmware=firmware_config(),
     ),
     Device(
         'LG7n',
@@ -357,6 +413,8 @@ DEVICES = [
                 description='Prevent LK from relocking seccfg',
             ),
         },
+        base=0xFFFF000050F00000,
+        firmware=firmware_config(),
     ),
     Device(
         'Q25',
@@ -424,6 +482,8 @@ DEVICES = [
                 description='Prevent LK from relocking seccfg',
             ),
         },
+        base=0xFFFF000050F00000,
+        firmware=firmware_config(),
     ),
     Device(
         'peridotl',
@@ -486,6 +546,8 @@ DEVICES = [
                 description='Force AVB_SLOT_VERIFY_FLAGS_ALLOW_VERIFICATION_ERROR',
             ),
         },
+        base=0xFFFF000050700000,
+        firmware=firmware_config(),
     ),
     Device(
         'S666LN',
@@ -675,5 +737,99 @@ DEVICES = [
             ),
         },
         cert_bypass=True
+    ),
+    Device(
+        'A75',
+        'INOI A75',
+        {
+            'sec_get_vfy_policy': PatchStage(
+                'sec_get_vfy_policy',
+                pattern='00 01 00 b4 fd 7b bf a9',
+                replacement='00 00 80 52 c0 03 5f d6',
+                match_mode=MatchMode.ALL,
+                description='Don\'t enforce secure boot policy',
+            ),
+            'force_green_state': PatchStage(
+                'force_green_state',
+                pattern='a8 02 00 b0 00 d1 09 b9 c0 03 5f d6',
+                replacement='a8 02 00 b0 1f d1 09 b9 c0 03 5f d6',
+                match_mode=MatchMode.ALL,
+                description='Force boot state to green',
+            ),
+            'bypass_security_control': PatchStage(
+                'bypass_security_control',
+                pattern='e8 0b 40 b9 1f 0d 00 71 21 01 00 54',
+                replacement='e8 0b 40 b9 1f 0d 00 71 1f 20 03 d5',
+                match_mode=MatchMode.ALL,
+                description='Skip security error branch',
+            ),
+            'avb_allow_verification_error': PatchStage(
+                'avb_allow_verification_error',
+                pattern='e1 03 14 2a 35 47 00 94 74 01 00 35 3c 00 80 52',
+                replacement='e1 03 14 2a 35 47 00 94 1f 20 03 d5 3c 00 80 52',
+                match_mode=MatchMode.ALL,
+                description='Force AVB_SLOT_VERIFY_FLAGS_ALLOW_VERIFICATION_ERROR',
+            ),
+            'skip_dm_verity_warning': PatchStage(
+                'skip_dm_verity_warning',
+                pattern='fd 7b 02 a9 f4 4f 03 a9 fd 83 00 91 08 11 94 d2',
+                replacement='c0 03 5f d6 1f 20 03 d5 1f 20 03 d5 1f 20 03 d5',
+                match_mode=MatchMode.ALL,
+                description='Skip dm-verity warning screen display',
+             ),
+            'spoof_sboot_state': PatchStage(
+                'spoof_get_sboot_state',
+                pattern='fd 7b be a9 f3 0b 00 f9 fd 03 00 91 f3 03 00 aa 20 00 80 52 c9',
+                replacement='48 04 80 52 08 00 00 b9 00 00 80 52 c0 03 5f d6 1f 20 03 d5 c9',
+                match_mode=MatchMode.ALL,
+                description='Force sboot state to ATTR_SBOOT_ONLY_ENABLE_ON_SCHIP',
+            ),
+            'spoof_lock_state': PatchStage(
+                'spoof_lock_state',
+                pattern='20 02 00 b4 fd 7b be a9 f3 0b 00 f9 fd 03 00 91',
+                replacement='88 00 80 52 08 00 00 b9 00 00 80 52 c0 03 5f d6',
+                match_mode=MatchMode.ALL,
+                description='Force lock state to LKS_LOCK',
+            ),
+            'dont_relock_seccfg': PatchStage(
+                'dont_relock_seccfg',
+                pattern='fd 7b be a9 f3 0b 00 f9 fd 03 00 91 f3 03 00 2a 28 00 80 52',
+                replacement='00 00 80 52 c0 03 5f d6 1f 20 03 d5 1f 20 03 d5 1f 20 03 d5',
+                match_mode=MatchMode.ALL,
+                description='Prevent LK from relocking seccfg',
+            ),
+        },
+        base=0xFFFF000050700000,
+        firmware={
+            'mcupm': {
+                'big': None,
+                'little_opp': None,
+                'volt': 1000,
+                'thermal': 100,
+                'little': None,
+                'minfreq_lit': None,
+                'sign': True,
+                'wrap': False,
+            },
+            'sspm': {
+                'minfreq_lit': None,
+                'minfreq_big': None,
+                'sign': True,
+                'wrap': False,
+            },
+            'pi_img': {
+                'set': [],
+                'set_reg': ['0x11c10580=0x2000'],
+                'wrap': False,
+            },
+            'gpufreq': {
+                'bp': None,
+                'oc': 1100,
+                'volt': 769,
+                'floor_volt': 583,
+                'offset': None,
+                'skip': [],
+            },
+        },
     ),
 ]
