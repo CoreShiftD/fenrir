@@ -792,10 +792,10 @@ DEVICES = [
         base=0xFFFF000050700000,
         firmware={
             'mcupm': {
-                'big': None,                   # BIG (A76) cluster max MHz, stock 2200.
-                'little': None,                # LITTLE (A55) cluster max MHz, stock 2000.
-                'volt': 1000,                  # EEMSN voltage mV override; None = auto/stock.
-                'thermal': 100,               # Thermal trip Celsius override; None = auto/stock.
+                'big': 2700,                   # BIG (A76) cluster max MHz, stock 2200.
+                'little': 2500,                # LITTLE (A55) cluster max MHz, stock 2000.
+                'volt': None,                  # EEMSN voltage mV override; None = auto/stock.
+                'thermal': None,               # Thermal trip Celsius override; None = auto/stock.
                 'sign': True,
                 'wrap': False,
             },
@@ -805,9 +805,9 @@ DEVICES = [
                 'wrap': False,
             },
             'gpufreq': {
-                'bp': None,
-                'oc': 1100,
-                'volt': 769,
+                'bp': True,
+                'oc': 1200,
+                'volt': 800,
                 'floor_volt': 583,
                 'offset': None,
                 'skip': [],

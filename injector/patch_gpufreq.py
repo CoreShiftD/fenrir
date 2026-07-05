@@ -1,73 +1,84 @@
 """
 patch_gpufreq.py — GPU OPP table patcher for mtk_gpufreq_mt6789.ko (MT6789)
 
-All patches always run (firmware identity validation). Stock value → replacement == pattern → NOOP.
-Supports overclock AND underclock.
-
-Usage:
-    python3 patch_gpufreq.py                          # bypass patches only → stock_OC.ko
-    python3 patch_gpufreq.py stock.ko out.ko          # explicit output name
-    python3 patch_gpufreq.py --bp --oc 1200           # bypass + OPP to 1200 MHz (full OC)
-    python3 patch_gpufreq.py --bp --oc 1300 --volt 850
-    python3 patch_gpufreq.py --bp                     # bypass only (explicit, same as default)
-    python3 patch_gpufreq.py --oc 1200                # OPP only, no code patches (advanced)
-    python3 patch_gpufreq.py --dry-run
-    python3 patch_gpufreq.py --list
-
-Flags:
-    --bp       Apply bypass code/data patches (avs_freq_check, apply_adjust×2, segment_adj).
-               Default ON when --oc absent. Pass with --oc for full OC (code + OPP).
-               NOTE: segment_cap_bypass intentionally excluded — causes bootloop.
-    --oc  MHZ  GPU ceiling MHz. Scales OPP entries + auto-scales voltage from OC curve.
-    --volt MV  Ceiling voltage mV override (default: auto from OC curve when --oc given)
-
-════════════════════════════════════════════════════════════════════
- BINARY LAYOUT  (mtk_gpufreq_mt6789.ko, stock 196672 bytes)
-════════════════════════════════════════════════════════════════════
-
- OPP struct (24 bytes, little-endian):
-   [freq_khz u32][volt u32][vsram u32][u3 u32][u4 u32][u5 u32]
-   volt/vsram: 10uV units  (80000 = 800.00 mV)
-   u3:  1 when freq >= 948 MHz, else 2
-   u4:  1875 when freq >= 835 MHz | 1250 when >= 596 MHz | 625 below
-   vsram: max(volt, 75000)  (750 mV floor)
-
- ┌─ OPP table (45 entries × 24 bytes) ────────────────────────────┐
- │ Stock range: 1100–390 MHz  (pattern source)                     │
- │ OC range:    1200–390 MHz  (default replacement)                │
- │ Voltage:     OC curve uniformly shifted by (ceil_volt - 800 mV) │
- └────────────────────────────────────────────────────────────────┘
-
- Code patches (4 total, all confirmed unique patterns):
- ┌─────────────────────────────────────────────────────────────────┐
- │ 1. avs_freq_check_bypass                                        │
- │    __gpufreq_avs_adjustment fn+0xcc                            │
- │    NOP b.ne  (skip efuse freq≠OPP abort on patched table)      │
- │                                                                 │
- │ 2. apply_adjust_probe_bypass                                    │
- │    __gpufreq_pdrv_probe fn+0x8b0                               │
- │    NOP bl  (__gpufreq_apply_adjust overwrites OPP table with   │
- │             efuse calibration data — removed in OC binary)     │
- │                                                                 │
- │ 3. apply_adjust_avs_bypass                                      │
- │    __gpufreq_avs_adjustment fn+0x2c8                           │
- │    NOP bl  (same function called again from AVS path)          │
- │                                                                 │
- │ 4. segment_adj_data                                             │
- │    .data g_segment_adj = 25 → 0                                │
- │    gpuppm_init uses this to set a runtime GPU ceiling via       │
- │    gpuppm. OC binary compiles this as 0 (uncapped).            │
- │                                                                 │
- │ NOT applied: segment_cap_bypass (b.hs→b.al in init_opp_idx)   │
- │    Forcing OPP idx=0 at boot → GPU jumps to table max freq     │
- │    before regulators stable → bootloop. g_segment_adj=0        │
- │    is sufficient; governor scales up after boot safely.        │
- └────────────────────────────────────────────────────────────────┘
-
-Stock OPP table (extracted from mtk_gpufreq_mt6789.ko @ 0x00bd10):
-  Entry 0:  1100 MHz  900.00 mV
-  Entry 44:  390 MHz  675.00 mV
-"""
+ All patches always run (firmware identity validation). Stock value → replacement == pattern → NOOP.
+ Supports overclock AND underclock.
+ 
+ Usage:
+     python3 patch_gpufreq.py                          # bypass patches only → stock_OC.ko
+     python3 patch_gpufreq.py stock.ko out.ko          # explicit output name
+     python3 patch_gpufreq.py --bp --oc 1200           # bypass + OPP to 1200 MHz (full OC)
+     python3 patch_gpufreq.py --bp --oc 1300 --volt 850
+     python3 patch_gpufreq.py --bp                     # bypass only (explicit, same as default)
+     python3 patch_gpufreq.py --oc 1200                # OPP only, no code patches (advanced)
+     python3 patch_gpufreq.py --dry-run
+     python3 patch_gpufreq.py --list
+ 
+ Flags:
+     --bp       Apply bypass code/data patches (avs_freq_check, apply_adjust×2, segment_adj).
+                Default ON when --oc absent. Pass with --oc for full OC (code + OPP).
+                NOTE: segment_cap_bypass intentionally excluded — causes bootloop.
+     --oc  MHZ  GPU ceiling MHz. Scales OPP entries + auto-scales voltage from OC curve.
+     --volt MV  Ceiling voltage mV override (default: auto from OC curve when --oc given)
+ 
+ ════════════════════════════════════════════════════════════════════
+  BINARY LAYOUT  (mtk_gpufreq_mt6789.ko, stock 196672 bytes)
+ ════════════════════════════════════════════════════════════════════
+ 
+  OPP struct (24 bytes, little-endian):
+    [freq_khz u32][volt u32][vsram u32][u3 u32][u4 u32][u5 u32]
+    volt/vsram: 10uV units  (80000 = 800.00 mV)
+    u3:  1 when freq >= 948 MHz, else 2
+    u4:  1875 when freq >= 835 MHz | 1250 when >= 596 MHz | 625 below
+    vsram: max(volt, 75000)  (750 mV floor)
+ 
+  ┌─ OPP table (45 entries × 24 bytes) ────────────────────────────┐
+  │ Stock range: 1100–390 MHz  (pattern source)                     │
+  │ OC range:    1200–390 MHz  (default replacement)                │
+  │ Voltage:     OC curve uniformly shifted by (ceil_volt - 800 mV) │
+  └────────────────────────────────────────────────────────────────┘
+ 
+    Code patches (4 total, all confirmed unique patterns):
+   ┌─────────────────────────────────────────────────────────────────┐
+   │ 1. avs_freq_check_bypass                                        │
+   │    __gpufreq_avs_adjustment fn+0xcc                            │
+   │    NOP b.ne  (skip efuse freq≠OPP abort on patched table)      │
+   │                                                                 │
+   │ 2. apply_adjust_probe_bypass                                    │
+   │    __gpufreq_pdrv_probe fn+0x8b0                               │
+   │    NOP bl  (__gpufreq_apply_adjust overwrites OPP table with   │
+   │             efuse calibration data — removed in OC binary)     │
+   │                                                                 │
+   │ 3. apply_adjust_avs_bypass                                      │
+   │    __gpufreq_avs_adjustment fn+0x2c8                           │
+   │    NOP bl  (same function called again from AVS path)          │
+   │                                                                 │
+    │ 4. segment_adj_data                                             │
+   │    .data g_segment_adj = 25 → 0                                │
+   │    gpuppm_init uses this to set a runtime GPU ceiling via       │
+   │    gpuppm. OC binary compiles this as 0 (uncapped).            │
+   │                                                                 │
+   │ NOT applied: segment_cap_bypass (b.hs→b.al in init_opp_idx)   │
+   │    Forcing OPP idx=0 at boot → GPU jumps to table max freq     │
+  │    before regulators stable → bootloop. g_segment_adj=0        │
+  │    is sufficient; governor scales up after boot safely.        │
+  └────────────────────────────────────────────────────────────────┘
+ 
+  ⚠ RELOCATION ISSUE (fixed):
+    The apply_adjust* patches NOP-out `bl __gpufreq_apply_adjust` calls,
+    but kernel .ko files are relocatable ELF objects. The .rela.text.*
+    sections still contain relocation entries targeting those call sites.
+    When the kernel module loader processes relocations, it:
+      a) Reads the instruction at r_offset — finds our NOP (0xd503201f)
+      b) On AArch64, validates bits[31:26] == 100101 (BL opcode) → NOP
+         fails the check → module load fails with -ENOEXEC → boot hang
+    The fix: after patching .text, nullify the corresponding .rela entries
+    by setting r_type = R_AARCH64_NONE (0). See nullify_bl_relocations().
+ 
+ Stock OPP table (extracted from mtk_gpufreq_mt6789.ko @ 0x00bd10):
+   Entry 0:  1100 MHz  900.00 mV
+   Entry 44:  390 MHz  675.00 mV
+ """
 
 import sys
 import struct
@@ -268,6 +279,106 @@ def probe_opp_offset(data: bytearray, candidates=DEFAULT_OPP_OFFSETS) -> Optiona
     return None
 
 
+def nullify_bl_relocations(data: bytearray, dry_run: bool = False) -> int:
+    """Nullify .rela entries targeting patched `bl` instructions.
+
+    After patching `bl __gpufreq_apply_adjust` → NOP in .text, scan
+    every .rela section for entries whose r_offset falls within one
+    of the NOP'd call sites and zero out r_info (→ R_AARCH64_NONE).
+    Returns count of nullified entries.
+    """
+    # ── Locate .text base in file ──────────────────────────────────────
+    if data[:4] != b'\x7fELF' or data[4] != 2:  # ELF64
+        print("  WARN  Not an ELF64 file — skipping rela nullification")
+        return 0
+
+    # ELF64 header offsets
+    e_shoff   = struct.unpack_from('<Q', data, 0x28)[0]
+    e_shentsz = struct.unpack_from('<H', data, 0x3a)[0]
+    e_shnum   = struct.unpack_from('<H', data, 0x3c)[0]
+    e_shstrndx = struct.unpack_from('<H', data, 0x3e)[0]
+
+    # Read .shstrtab to resolve section names
+    shstr_ent_off = e_shoff + e_shstrndx * e_shentsz
+    shstr_off = struct.unpack_from('<Q', data, shstr_ent_off + 0x18)[0]
+    shstr_sz  = struct.unpack_from('<Q', data, shstr_ent_off + 0x20)[0]
+    shstrtab  = data[shstr_off:shstr_off + shstr_sz]
+
+    def _sec_name(idx: int) -> str:
+        name_off = struct.unpack_from('<I', data, e_shoff + idx * e_shentsz)[0]
+        return shstrtab[name_off:shstrtab.index(b'\x00', name_off)].decode('ascii', errors='replace')
+
+    # Find .text section index and its file offset
+    text_idx = None
+    text_foff = 0
+    for i in range(e_shnum):
+        if _sec_name(i) == '.text':
+            text_idx = i
+            text_foff = struct.unpack_from('<Q', data, e_shoff + i * e_shentsz + 0x18)[0]
+            break
+    if text_idx is None:
+        print("  WARN  .text section not found — skipping rela nullification")
+        return 0
+
+    # Build list of patched-bl .text-relative offsets by scanning for
+    # NOP bytes (1f 20 03 d5) that used to be `bl` (00 00 00 94).
+    # We look for the 12-byte apply_adjust patterns with NOP in the last 4.
+    nop_bl_ranges = []   # list of (r_offset_start, r_offset_end_exclusive)
+    bl_patterns = [
+        bytes.fromhex('e0 03 14 aa e1 03 13 2a 1f 20 03 d5'),
+        bytes.fromhex('61 00 80 52 e0 03 13 aa 1f 20 03 d5'),
+    ]
+    for pat in bl_patterns:
+        pos = 0
+        while True:
+            pos = data.find(pat, pos)
+            if pos < 0:
+                break
+            # Convert file offset → .text-relative offset
+            bl_text_off = pos - text_foff
+            # The NOP occupies the last 4 bytes of the 12-byte pattern
+            nop_start = bl_text_off + 8   # bytes 8-11 have the NOP
+            nop_bl_ranges.append((nop_start, nop_start + 4))
+            pos += 1
+
+    # ── Known-patched non-BL ranges ─────────────────────────────────────
+
+    if not nop_bl_ranges:
+        return 0   # nothing to nullify
+
+    # ── Iterate .rela sections, nullify matching entries ───────────────
+    nullified = 0
+    for i in range(e_shnum):
+        name = _sec_name(i)
+        if not name.startswith('.rela'):
+            continue
+        ent_off = e_shoff + i * e_shentsz
+        sh_type   = struct.unpack_from('<I', data, ent_off + 4)[0]
+        if sh_type != 4:     # SHT_RELA
+            continue
+        sh_offset = struct.unpack_from('<Q', data, ent_off + 0x18)[0]
+        sh_size   = struct.unpack_from('<Q', data, ent_off + 0x20)[0]
+        sh_info   = struct.unpack_from('<I', data, ent_off + 0x2c)[0]
+
+        # Does this .rela section target .text?
+        if sh_info != text_idx:
+            continue
+
+        for j in range(0, sh_size, 24):
+            r_off  = struct.unpack_from('<Q', data, sh_offset + j)[0]
+            for nop_start, nop_end in nop_bl_ranges:
+                if nop_start <= r_off < nop_end:
+                    # Nullify r_info → R_AARCH64_NONE
+                    tag = 'DRY ' if dry_run else 'OK  '
+                    if not dry_run:
+                        data[sh_offset + j + 8 : sh_offset + j + 16] = b'\x00' * 8
+                    print(f"  {tag:12s} rela[{j//24}] @ {name}: r_offset=.text+0x{r_off:x} → R_AARCH64_NONE")
+                    nullified += 1
+                    break
+
+    return nullified
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Patch builder
 # ─────────────────────────────────────────────────────────────────────────────
@@ -277,9 +388,11 @@ def build_patches(ceil_khz: Optional[int], ceil_volt: Optional[int],
     """
     Build all PatchStages.
 
-    Code patches (always applied):
-      segment_cap_bypass, avs_freq_check_bypass, apply_adjust_probe_bypass,
-      apply_adjust_avs_bypass, segment_adj_data.
+    Code patches:
+      avs_freq_check_bypass, segment_adj_data  (always when apply_bp is set).
+      apply_adjust_probe_bypass, apply_adjust_avs_bypass  (only when ceil_khz is set,
+        because they prevent efuse voltage calibration — without OC the uncalibrated
+        voltages can cause GPU hangs).
 
     OPP table (45 stages, only when ceil_khz is not None):
       Pattern = stock bytes (identity check).
@@ -478,6 +591,10 @@ def patch_ko(input_path: str, output_path: str,
             continue
         if not apply_bp:
             continue
+        # apply_adjust* NOPs prevent efuse voltage calibration — only safe
+        # when --oc modifies the OPP table. Without OC, they cause boot failure.
+        if stage.name.startswith('apply_adjust') and ceil_khz is None:
+            continue
         try:
             n = apply_patch(data, stage)
             tag = 'NOOP ' if stage.is_noop else f"{'DRY ' if dry_run else ''}OK  ({n})"
@@ -505,6 +622,14 @@ def patch_ko(input_path: str, output_path: str,
                 except Exception as e:
                     errors.append((stage.name, str(e)))
                     print(f"  FAIL         {stage.name}: {e}")
+
+    # ── Nullify .rela entries for patched `bl` instructions ──────────
+    # Without this, the kernel module loader's relocation pass overwrites
+    # our NOPs with the resolved function addresses (the .rela section
+    # still contains entries targeting those offsets).
+    n_rela = nullify_bl_relocations(data, dry_run)
+    if n_rela:
+        print(f"  Rela        {n_rela} relocation(s) nullified (R_AARCH64_NONE)")
 
     print()
     if errors:
@@ -601,6 +726,8 @@ examples:
             if s.name.startswith('opp_') and not ceil_khz:
                 continue
             if not s.name.startswith('opp_') and not apply_bp:
+                continue
+            if s.name.startswith('apply_adjust') and ceil_khz is None:
                 continue
             tag = 'noop ' if s.is_noop else 'PATCH'
             print(f"  [{tag}] {s.description}")
