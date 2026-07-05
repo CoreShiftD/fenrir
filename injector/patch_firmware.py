@@ -8,16 +8,15 @@ modified image. Opt-in from build.sh via `--firmware`.
 
     build.sh <device> [bootloader] --firmware
         └─> patch_firmware.py <device>
-              ├─ mcupm_devices.py  mcupm.img  <dev>-mcupm.img   (--big/--minfreq-lit/--sign …)
-              ├─ sspm_devices.py   sspm.img   <dev>-sspm.img    (--minfreq-lit/--minfreq-big/--sign)
+              ├─ mcupm_devices.py  mcupm.img  <dev>-mcupm.img   (--big/--floor/--sign …)
               ├─ pi_img_devices.py pi_img.bin <dev>-pi_img.bin  (--set-reg/--write …)
               └─ patch_gpufreq.py mtk_gpufreq_mt6789.ko <dev>-gpufreq.ko (--bp/--oc …)
 
 Every knob defaults to no-op; a partition with no actionable value or a missing
 input image is SKIPPED. Nothing is flashed — this only produces files.
 
-EXPERIMENTAL / UNVERIFIED per silicon (esp. the min-freq floors and the forged
-cert2) — flash and verify on-device. See CPU_OC_CHAIN_NOTES.md.
+EXPERIMENTAL / UNVERIFIED per silicon (esp. the forged cert2) — flash and verify
+on-device. See CPU_OC_CHAIN_NOTES.md.
 
 Run under the liblk venv so re-signing works:
     /opt/src/fenrir/.venv/bin/python3 injector/patch_firmware.py <device>
@@ -46,34 +45,16 @@ def venv_python() -> str:
 def _mcupm_args(cfg):
     a = []
     if cfg.get('big')     is not None: a += ['--big', str(cfg['big'])]
-    little_opp = cfg.get('little_opp', cfg.get('floor'))
-    if little_opp is not None: a += ['--floor', str(little_opp)]
+    if cfg.get('little')  is not None: a += ['--little', str(cfg['little'])]
     if cfg.get('volt')    is not None: a += ['--volt', str(cfg['volt'])]
     if cfg.get('thermal') is not None: a += ['--thermal', str(cfg['thermal'])]
-    lt = cfg.get('little')
-    if lt is True:            a += ['--little']
-    elif isinstance(lt, int): a += ['--little', str(lt)]
-    if cfg.get('minfreq_lit') is not None: a += ['--minfreq-lit', str(cfg['minfreq_lit'])]
     if cfg.get('sign'): a += ['--sign']
     if cfg.get('wrap'): a += ['--wrap']
     return a
 
 def _mcupm_actionable(cfg):
     return any(cfg.get(k) is not None
-               for k in ('big', 'little_opp', 'floor', 'volt',
-                         'thermal', 'little', 'minfreq_lit'))
-
-
-def _sspm_args(cfg):
-    a = []
-    if cfg.get('minfreq_lit') is not None: a += ['--minfreq-lit', str(cfg['minfreq_lit'])]
-    if cfg.get('minfreq_big') is not None: a += ['--minfreq-big', str(cfg['minfreq_big'])]
-    if cfg.get('sign'): a += ['--sign']
-    if cfg.get('wrap'): a += ['--wrap']
-    return a
-
-def _sspm_actionable(cfg):
-    return cfg.get('minfreq_lit') is not None or cfg.get('minfreq_big') is not None
+               for k in ('big', 'little', 'volt', 'thermal'))
 
 
 def _pi_img_args(cfg):
@@ -107,8 +88,6 @@ def _gpufreq_actionable(cfg):
 PARTS = {
     'mcupm':  dict(inp='mcupm.img',  out='{dev}-mcupm.img',  tool='mcupm_devices.py',
                    args=_mcupm_args,  actionable=_mcupm_actionable),
-    'sspm':   dict(inp='sspm.img',   out='{dev}-sspm.img',   tool='sspm_devices.py',
-                   args=_sspm_args,   actionable=_sspm_actionable),
     'pi_img': dict(inp='pi_img.bin', out='{dev}-pi_img.bin', tool='pi_img_devices.py',
                    args=_pi_img_args, actionable=_pi_img_actionable),
     'gpufreq': dict(inp='mtk_gpufreq_mt6789.ko', out='{dev}-gpufreq.ko',

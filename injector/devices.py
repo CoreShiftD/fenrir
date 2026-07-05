@@ -2,21 +2,13 @@ from device import Device
 from stage import PayloadStage, PatchStage
 from patch_utils import MatchMode
 
-def firmware_config(mcupm=None, sspm=None, pi_img=None, gpufreq=None):
+def firmware_config(mcupm=None, pi_img=None, gpufreq=None):
     cfg = {
         'mcupm': {
-            'big': None,                   # BIG max OPP MHz, stock 2200.
-            'little_opp': None,                 # LITTLE max/throttle OPP MHz, stock 750/650; maps to mcupm --floor.
+            'big': None,                   # BIG (A76) cluster max MHz, stock 2200.
+            'little': None,                # LITTLE (A55) cluster max MHz, stock 2000.
             'volt': None,                  # EEMSN voltage mV override; None = auto/stock.
             'thermal': None,               # Thermal trip Celsius override; None = auto/stock.
-            'little': None,                # Patch DVFS timer entries; True or MHz.
-            'minfreq_lit': None,           # EXPERIMENTAL LITTLE minimum floor MHz candidate.
-            'sign': True,
-            'wrap': False,
-        },
-        'sspm': {
-            'minfreq_lit': None,           # EXPERIMENTAL LITTLE minimum floor MHz candidate.
-            'minfreq_big': None,           # EXPERIMENTAL BIG minimum floor MHz candidate.
             'sign': True,
             'wrap': False,
         },
@@ -36,8 +28,6 @@ def firmware_config(mcupm=None, sspm=None, pi_img=None, gpufreq=None):
     }
     if mcupm:
         cfg['mcupm'].update(mcupm)
-    if sspm:
-        cfg['sspm'].update(sspm)
     if pi_img:
         cfg['pi_img'].update(pi_img)
     if gpufreq:
@@ -802,18 +792,10 @@ DEVICES = [
         base=0xFFFF000050700000,
         firmware={
             'mcupm': {
-                'big': None,
-                'little_opp': None,
-                'volt': 1000,
-                'thermal': 100,
-                'little': None,
-                'minfreq_lit': None,
-                'sign': True,
-                'wrap': False,
-            },
-            'sspm': {
-                'minfreq_lit': None,
-                'minfreq_big': None,
+                'big': None,                   # BIG (A76) cluster max MHz, stock 2200.
+                'little': None,                # LITTLE (A55) cluster max MHz, stock 2000.
+                'volt': 1000,                  # EEMSN voltage mV override; None = auto/stock.
+                'thermal': 100,               # Thermal trip Celsius override; None = auto/stock.
                 'sign': True,
                 'wrap': False,
             },

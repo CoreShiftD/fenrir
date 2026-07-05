@@ -22,8 +22,9 @@ Device slot: `_a`. All device access below is **pull/read-only — never flash**
  CPU-DVFS SRAM LUT  (CSRAM 0x11bc00, perf-domain0 0x11bc10, domain1 0x11bd30)
         │  read by
         ▼
- kernel driver  mediatek,cpufreq-hybrid + mtk-cpufreq-hw   <-- NOT editable
-   generates the full 16/24-step ladder from anchors + PLL/clk-div/regulators
+ mtk-cpufreq-hw driver (vendor .ko in vendor_boot, NOT vmlinux)  <-- no static table
+   generates the full 16/24-step ladder from SRAM anchors + PLL/clk-div/regulators
+   (reads SRAM via ioremap; holds no freq constants — not a firmware-patch target)
         │  exposes
         ▼
  /sys/.../cpufreq/policy0 (LITTLE)  policy6 (BIG)   scaling_driver = mtk-cpufreq-hw
@@ -46,9 +47,23 @@ static CPU OPP table.**
    (A76) are **bare — no `operating-points`/`opp-hz`**. The only `opp-table-*`
    nodes are peripheral (disp/mdp/venc/vdec/cam/img/ipe) and `/soc/opp-table0`
    (bus/CCI ~1.1GHz..390MHz). None are CPU cores.
-3. `cpudvfs.ko` (pulled from `/vendor_dlkm/lib/modules/`, 30 KB) contains **zero
-   CPU-freq values** — it's glue, not a table. `mediatek_cpufreq_hw` is built
-   into vmlinux (no `.ko`).
+3. Neither MTK cpufreq module holds a static table — both read the ladder from SRAM:
+   - `cpudvfs.ko` (`/vendor_dlkm/lib/modules/`, 30 096 B): zero CPU-freq constants;
+     pure proc/eem glue — `cpufreq_debug_proc_*` (the `/proc/cpudvfs` node),
+     `eem_cur_volt_proc_*`, `get_devinfo`, `mtk_eem_init`; imports
+     `cpufreq_cpu_get` / `dev_pm_opp_find_freq_floor` (consumes the ladder, never
+     defines it).
+   - `mediatek-cpufreq-hw.ko` (the `scaling_driver`, 28 296 B): zero freq constants;
+     builds the table at runtime (`mtk_cpu_create_freq_table`,
+     `mtk_cpufreq_hw_target_index`) by ioremapping the perf-domain SRAM
+     (`devm_platform_ioremap_resource`; of_match `"mediatek,cpufreq-hw"`).
+
+   Both are **vendor modules in the vendor_boot ramdisk** (`lib/modules/`), loaded
+   early and live in `/proc/modules`. The GKI `vmlinux` (5.10.x-android12) carries
+   only the generic cpufreq **core** (`cpufreq_register_driver` + exported OPP
+   symbols) — no MTK driver, no `mediatek,cpufreq-hw` string. Swapping the GKI
+   kernel therefore leaves cpufreq intact: the vendor module loads from vendor_boot
+   and reads the ladder from SRAM regardless of the vmlinux in use.
 
 ### DTB DVFS bindings (for reference)
 ```
@@ -64,9 +79,13 @@ mediatek,cpufreq-hybrid:
 mediatek,cpufreq-hw:
   reg = performance-domain0 0x11bc10/0x120, performance-domain1 0x11bd30/0x120
 ```
-The ladder LUT lives in this SRAM at runtime. `/dev/mem` is locked on-device, so
-it can't be read live; it is populated by firmware, not stored in a partition as
-an explicit table.
+The ladder LUT lives in this SRAM at runtime, populated by firmware — not stored in
+any partition as an explicit table. `/dev/mem` is absent on-device (no direct SRAM
+dump), but the **effective ladder is readable live** via the Energy Model:
+`/sys/kernel/debug/energy_model/cpu{0,6}/ps:*/{frequency,power,cost}` — 24 LITTLE
+OPPs (500→2000 MHz) + 16 BIG OPPs (725→2200 MHz), matching
+`scaling_available_frequencies`. The min OPP (500 / 725) is simply the lowest EM
+step — there is no separate "min floor" record in play (§6).
 
 ---
 
@@ -107,7 +126,7 @@ Pulled read-only from slot `_a`:
 |---|---|---|
 | `mcupm_a` | tinysys-mcupm-RV33_A | CPU DVFS anchors — THE knob (see §2) |
 | `pi_img_a` | (GFH `pi_img`) | aging/EEMSN envelope; **md5 == loose `pi_img.bin`** |
-| `sspm_a` | tinysys-sspm (720 KB) | thermal/power budget only — refs CPU **min** floors 725/500 kHz; no ladder |
+| `sspm_a` | tinysys-sspm (720 KB) | thermal/power/QoS budget only — holds a LITTLE `500000` record table (×8) **and** a `(cpu_freq × dram_freq)` DVFS-bandwidth map (the `725000` "BIG floor" is a key in *that* map, not a floor record — see §6); no CPU ladder |
 | `spmfw_a` | spmfw (14 KB) | SPM sleep firmware — no CPU freq |
 
 Conclusion: no firmware partition stores an explicit full CPU ladder. It is
@@ -127,8 +146,9 @@ All firmware partitions are 1 MB slots (GFH image at start, 0xFF/0x00 padded).
 
 - **Raise freq up to the EEMSN threshold:** `mcupm_devices.py --big <MHz>`
   (validated to 2600 on-device). This is the whole job below the wall.
-- **Min freq (LITTLE 500 / BIG 725):** kernel/DTS + hardware-owned, NOT in mcupm
-  as an editable clamp. See `mcupm_devices.py` docstring "MIN FREQ" note.
+- **Min freq (LITTLE 500 / BIG 725):** kernel/DTS + hardware-owned (`mtk-cpufreq-hw`
+  perf-domain SRAM LUT), NOT in mcupm/sspm as an editable clamp — on-device verified
+  (§6a-bis). See `mcupm_devices.py` docstring "MIN FREQ" note.
 - **Hard ceiling past a threshold:** EEMSN (`vboot violate`) validating against
   `pi_img.bin` aging data. This is firmware, not kernel. Editing path:
   `pi_img_devices.py` (patch payload[4:-4] + cert_bypass re-sign). The exact
@@ -142,64 +162,86 @@ Only then can `pi_img_devices.py` gain a verified cap patch.
 
 ---
 
-## 6. Min-freq FLOOR — candidate found (EXPERIMENTAL, unverified)
+## 6. The `500000`/`725000` records are DVFS/QoS data, not a min-freq clamp
 
-Follow-up to §4: a coherent min-freq FLOOR structure **does** exist in firmware,
-replicated across the two CPU-DVFS coprocessor images. It is the best editable
-candidate for the per-cluster minimum, but it has **NOT** been verified on-device
-to move `scaling_min_freq` (it may instead be only a thermal/power-budget floor).
+`scaling_min_freq` (LITTLE 500 / BIG 725 MHz) is owned by `mtk-cpufreq-hw` + the
+perf-domain SRAM LUT (§1, §4): the minimum is just the lowest OPP the driver builds
+from SRAM. The `500000`/`725000` values that also appear in `mcupm.img`/`sspm.img`
+are power/thermal-envelope and DRAM-bandwidth data — rewriting them does not move
+the cpufreq minimum. What each record is:
 
-### 6a. The floor records (40-byte, `[floor_kHz u32][0x0013bdb6][max_code]…`)
-Same record shape found in mcupm's `[C]` table (§ mcupm_devices.py [C]) and in
-`sspm`. The first u32 of each record is the floor frequency in **kHz**:
+### 6a. What the records are
+The 40-byte record shape `[freq_kHz u32][0x0013bdb6][…]` (`0x0013bdb6` = 1293750, a
+constant power/budget coefficient) holds `500000` (`0x0007a120`) in:
 
-| image | LITTLE floor `500000` (0x0007a120) | BIG floor `725000` (0x000b0fa8) |
-|---|---|---|
-| `mcupm.img` | **×4** (the `[C]` table @ file 0x147f0) | ×0 (not present) |
-| `sspm.img`  | **×8** (@ file 0x18f0, stride 0x24) | **×7** (@ file 0x179c region) |
+| image | `500000` records |
+|---|---|
+| `mcupm.img` | **×4** — the `[C]` power/thermal-envelope table @ file 0x147f0 (stride 0x28) |
+| `sspm.img`  | **×8** — @ file 0x18f0 (stride 0x24) |
 
-- Device truth matches exactly: LITTLE min = 500 MHz, BIG min = 725 MHz.
-- No collisions: `400000/450000` absent; `550000`/`600000` exist but are other
-  freq refs, untouched by a floor patch that only rewrites `500000`/`725000`.
-- A floor patch = ALL-match u32 replace `500000 → lit*1000` and `725000 → big*1000`
-  (mcupm: LITTLE only; sspm: both clusters). Record length is preserved.
+The `725000` values in `sspm` are not floor records. Their 7 occurrences
+(0x179c…0x1824) carry **no** `0x0013bdb6` marker, sit at irregular stride, and are
+each paired with a descending DRAM data rate:
 
-### 6b. Signing / cert requirements per partition (verified)
-All three CPU-DVFS images are GFH-wrapped and RSA cert2-signed, and all load +
+```
+0x179c: 725000, 4266000    0x17cc: 725000, 1866000    (DRAM data rates:
+0x17a4: 725000, 3200000    0x17e4: 725000, 1600000     4266/3200/2400/
+0x17b4: 725000, 2400000    0x1804: 725000, 1200000     1866/1600/1200/
+                           0x1824: 725000,  800000     800 MHz)
+```
+
+…interleaved with `650000/600000/550000` CPU rows: a `(cpu_freq × dram_freq)`
+DVFS→DRAM-bandwidth / QoS map, where `725000` is a lookup key (`725000` =
+`0x000b1008`).
+
+### 6b. How the minimum is actually enforced
+- **On-device (INOI A75, mt6789, `adb` root):** `policy0` (LITTLE, cpu0-5) and
+  `policy6` (BIG, cpu6-7) both use `scaling_driver = mtk-cpufreq-hw`;
+  `cpuinfo_min_freq` = 500000 / 725000. Writing `scaling_min_freq = 200000` clamps
+  straight back to `500000` — the floor is enforced by the driver/HW.
+- **Device tree (live `/proc/device-tree`):** CPU nodes carry `performance-domains`
+  but no `operating-points`/`opp-hz`; the ladder + min OPP come from the
+  `mtk-cpufreq-hw` perf-domain SRAM LUT (§1).
+- **mcupm (RISC-V):** the `[C]` table @0x147f0 has zero code references (the RISC-V
+  analyzer resolves 236 other data refs, including the §2 OC-anchor tables). It is
+  passive data mcupm's DVFS path never reads.
+
+The `725000`×7 set is the DRAM-bandwidth map above, so rewriting it corrupts that
+map rather than setting any floor.
+
+### 6c. Signing / cert requirements per partition
+`mcupm.img` and `pi_img.bin` are GFH-wrapped and RSA cert2-signed, and load +
 re-sign cleanly through `liblk` + fenrir's local `cert_bypass`:
 
 | image | fwid | cert1/cert2 | note |
 |---|---|---|---|
-| `mcupm.img` | tinysys-mcupm-RV33_A | @0x1eab8/0x1f378 | but device runs a **raw byte-patched** mcupm (no cert change) and boots → this **unlocked** unit does NOT enforce mcupm cert2 |
-| `sspm.img`  | tinysys-sspm | @0xaf0a8/0xaf8d8 | GFH+cert2 like the others |
+| `mcupm.img` | tinysys-mcupm-RV33_A | @0x1eab8/0x1f378 | device runs a **raw byte-patched** mcupm (no cert change) and boots → this **unlocked** unit does NOT enforce mcupm cert2 |
 | `pi_img.bin`| pi_img | (KRAKEN, §KRAKEN notes) | already re-signed by `pi_img_devices.py` |
 
-`mcupm_devices.py` currently writes **raw** (no re-sign). "Cert every modification"
-therefore requires adding a re-sign step (shared `fw_sign.py`). As with pi_img,
-**on-device acceptance of the forged cert2 is UNTESTED** (KRAKEN §6d).
+`mcupm_devices.py` writes **raw** by default; `--sign` adds a re-sign step (shared
+`fw_sign.py`). On-device acceptance of the forged cert2 is **UNTESTED** (KRAKEN §6d).
 
-### 6c. Build wiring (IMPLEMENTED — all under `injector/`)
+### 6d. Build wiring (all under `injector/`)
 
 | file | role |
 |---|---|
 | `injector/fw_sign.py` | shared `liblk`+local `cert_bypass` re-sign (`sign_image`, OVERRIDE default, WRAP fallback) |
-| `injector/mcupm_devices.py` | `--minfreq-lit <MHz>` (rewrites `500000`×4 in `[C]`) + `--sign` |
-| `injector/sspm_devices.py` | NEW: `--minfreq-lit <MHz>` (`500000`×8) / `--minfreq-big <MHz>` (`725000`×7) + `--sign` |
-| `injector/pi_img_devices.py` | existing; `--set`/`--set-reg` + `--write` (always re-signs) |
-| `injector/devices.py` | per-device `firmware={'mcupm':{…},'sspm':{…},'pi_img':{…}}` (rides `**kwargs`/`device_opts`) |
-| `injector/patch_firmware.py` | orchestrator: reads the device's `firmware` block, runs each patcher with ITS own flags, re-signs, emits `<device>-<part>` images |
+| `injector/mcupm_devices.py` | CPU freq: `--big` / `--floor` / `--little` / `--volt` / `--thermal` + `--sign` |
+| `injector/pi_img_devices.py` | `--set`/`--set-reg` + `--write` (always re-signs) |
+| `injector/patch_gpufreq.py` | GPU OPP table in `mtk_gpufreq_mt6789.ko`: `--bp` / `--oc` / `--volt` |
+| `injector/devices.py` | per-device `firmware={'mcupm':{…},'pi_img':{…},'gpufreq':{…}}` |
+| `injector/patch_firmware.py` | orchestrator: reads the device's `firmware` block, runs each patcher with ITS own flags, emits `<device>-<part>` images |
 | `build.sh` | `--firmware` opt-in flag → runs `patch_firmware.py <device>` after inject |
 
 **Usage**
 ```bash
-# 1. put the device's stock images in the repo root: mcupm.img sspm.img pi_img.bin
+# 1. put the device's stock images in bin/firmware/<device>/: mcupm.img pi_img.bin
 # 2. edit the device's firmware={…} block in injector/devices.py, e.g.:
-#      'mcupm':  {'big': 2600, 'little': True, 'minfreq_lit': 400, 'sign': True},
-#      'sspm':   {'minfreq_lit': 400, 'minfreq_big': 600, 'sign': True},
+#      'mcupm':  {'big': 2600, 'little': True, 'sign': True},
 #      'pi_img': {'set_reg': ['0x11c10580=0x2000'], 'sign': True},
 # 3. build with the opt-in flag (must use the liblk venv for signing):
 ./build.sh A75 --firmware
-#    → a75-fenrir.bin (bootloader) + a75-mcupm.img + a75-sspm.img + a75-pi_img.bin
+#    → a75-fenrir.bin (bootloader) + a75-mcupm.img + a75-pi_img.bin
 ```
 
 **Guarantees / caveats**
@@ -207,8 +249,6 @@ therefore requires adding a re-sign step (shared `fw_sign.py`). As with pi_img,
   missing input image is **skipped**. Default `./build.sh <dev>` (no `--firmware`)
   is unchanged (bootloader-only).
 - All outputs are **file-only — nothing is flashed.** Flashing is the user's step.
-- Config schema is documented inline in `injector/devices.py` (A75 entry).
-- **EXPERIMENTAL / UNVERIFIED:** the min-freq floors and the forged cert2 are
-  untested on-device. `mcupm --big` is the only path validated on real hardware
-  (§2). Verify each partition on-device (`cpuinfo_min_freq`,
-  `scaling_available_frequencies`, boots at all) before trusting it.
+- `mcupm --big` is the CPU-freq path validated on real hardware (§2). The forged
+  cert2 re-sign path is still untested on-device — verify any signed partition
+  boots before trusting it.

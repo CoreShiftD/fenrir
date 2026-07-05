@@ -9,7 +9,7 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 # Optional opt-in: --firmware runs the EXPERIMENTAL multi-partition firmware OC
-# (mcupm/sspm/pi_img) after the bootloader inject. Strip it before positional args.
+# (mcupm/pi_img/gpufreq) after the bootloader inject. Strip it before positional args.
 DO_FIRMWARE=0
 POSARGS=()
 for arg in "$@"; do

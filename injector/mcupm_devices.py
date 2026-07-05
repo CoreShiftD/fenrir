@@ -6,17 +6,17 @@ All patches always run (firmware identity validation). Unset flags → stock val
 
 Usage:
     python3 mcupm_devices.py mcupm.img out.img --big 2600
-    python3 mcupm_devices.py mcupm.img out.img --big 2600 --floor 800
+    python3 mcupm_devices.py mcupm.img out.img --big 2600 --little 2200
     python3 mcupm_devices.py mcupm.img out.img --big 2600 --volt 1150
     python3 mcupm_devices.py mcupm.img out.img --big 2600 --dry-run
     python3 mcupm_devices.py mcupm.img out.img --list
 
-Flags:
-    --big   MHZ   BIG (A76) ceiling MHz (default: 2200, stock). All BIG entries scale.
-    --floor MHZ   LITTLE (A55) max MHz (default: 750, stock). Throttle scales from it.
-    --volt  MV    EEMSN voltage mV override (default: auto-scaled from --big)
+Flags (two confirmed cluster-max axes, validated on-device INOI A75):
+    --big    MHZ  BIG (A76, policy6) cluster max (default: 2200, stock). All BIG entries scale.
+    --little MHZ  LITTLE (A55, policy0) cluster max (default: 2000, stock). Scales the A55
+                  DVFS-timer top + LITTLE governor throttle OPPs.
+    --volt   MV   EEMSN voltage mV override (default: auto-scaled from --big)
     --thermal C   Thermal trip ceiling °C (default: auto-scaled; stock: 95/85)
-    --little      Also patch DVFS timer freq entries (scaled from --big)
 
 ════════════════════════════════════════════════════════════════════
  BINARY LAYOUT  (FW: tinysys-mcupm-RV33_A, mcupm.img = 129344 bytes)
@@ -52,14 +52,14 @@ Flags:
  │ Offset    Type    Stock MHz   adj        lat    Patched by      │
  │ 0x16598   BIG     2000       -10715     10715   --big (thr)     │
  │ 0x165b0   BIG     1600        -7693      7693   --big (low thr) │
- │ 0x165c8   LITTLE   650       -10000     10000   --floor (thr)   │
- │ 0x165e0   LITTLE   650       -10000     10000   --floor (thr)   │
- │ 0x165f8   LITTLE   650       -10000     10000   --floor (thr)   │
+ │ 0x165c8   LITTLE   650       -10000     10000   --little (thr)  │
+ │ 0x165e0   LITTLE   650       -10000     10000   --little (thr)  │
+ │ 0x165f8   LITTLE   650       -10000     10000   --little (thr)  │
  │ 0x16670   BIG     2200       -15000     15000   --big (max)     │
  │ 0x16688   BIG     1650       -15000     15000   --big (low max) │
- │ 0x166a0   LITTLE   750       -14286     14286   --floor (max)   │
- │ 0x166b8   LITTLE   750       -14286     14286   --floor (max)   │
- │ 0x166d0   LITTLE   750       -14286     14286   --floor (max)   │
+ │ 0x166a0   LITTLE   750       -14286     14286   --little (thr)  │
+ │ 0x166b8   LITTLE   750       -14286     14286   --little (thr)  │
+ │ 0x166d0   LITTLE   750       -14286     14286   --little (thr)  │
  └─────────────────────────────────────────────────────────────────┘
 
  ┌─ [B] Compact freq-tuple table (0x15fec) — source freq rows ─────┐
@@ -81,9 +81,9 @@ Flags:
  │   +0x0e/+0x14 per-domain max code (×5/16 → MHz):                 │
  │        0x147f0→1602  0x14818→1562  0x14840→2202  0x14868→2182    │
  │ This is the aging/thermal power envelope, immediately preceding  │
- │ the thermal trips. The 500000 floor here is NOT the cpufreq      │
- │ scaling_min_freq (that is kernel/DTS-owned) — do not treat it as │
- │ a min-freq knob without on-device verification.                  │
+ │ the thermal trips. The 500000 value is NOT scaling_min_freq      │
+ │ (that is kernel/HW-owned, mtk-cpufreq-hw perf-domain SRAM LUT) — │
+ │ not a min-freq knob. Left untouched.                             │
  └─────────────────────────────────────────────────────────────────┘
 
  ┌─ Thermal trips (0x1488c) — read by code @0xe07e ───────────────┐
@@ -91,9 +91,10 @@ Flags:
  │ low  trip: 0x14890  stock 0x55 = 85°C   → --thermal            │
  └─────────────────────────────────────────────────────────────────┘
 
- ┌─ DVFS timer table (0x17b88) ────────────────────────────────────┐
+ ┌─ DVFS timer table (0x17b88) — LITTLE (A55) cluster max anchor ──┐
  │ Entry 2000 MHz: 0x17b88  [freq u16][0x186a u16][0x015c u16]... │
  │ Entry 1540 MHz: 0x17d80  same layout                           │
+ │ Top entry (2000) = A55 policy0 max — patched by --little.      │
  └─────────────────────────────────────────────────────────────────┘
 
  ┌─ EEMSN freq+voltage (0x17cb4) ──────────────────────────────────┐
@@ -219,23 +220,18 @@ def _auto_volt(big_mhz: int) -> int:
 
 
 def build_patches(big_mhz: int = 2200, volt_mv: int = None,
-                  dvfs_mhz: int = None, floor_mhz: int = 750,
-                  minfreq_lit: int = None) -> List[PatchStage]:
+                  little_mhz: int = None) -> List[PatchStage]:
     """
-    Build all patch stages. Everything scales proportionally from big_mhz (stock=2200).
-    volt_mv=None → auto-scaled. dvfs=True → also patch DVFS timer entries.
-    minfreq_lit=None → LITTLE min-freq floor left at stock (no-op).
+    Two confirmed cluster-max axes (validated on-device, INOI A75):
+      big_mhz    — BIG (A76, policy6) cluster max; scales every BIG anchor.
+      little_mhz — LITTLE (A55, policy0) cluster max; scales the A55 DVFS-timer
+                   top and the LITTLE governor throttle OPPs. None = stock 2000.
+    volt_mv=None → EEMSN voltage auto-scaled from big_mhz.
     """
-
-    def _noop(pat: str, name: str, desc: str, mode: MatchMode = MatchMode.EXACT) -> PatchStage:
-        return PatchStage(name=name, pattern=pat, replacement=pat, match_mode=mode,
-                          description=f'{desc} (stock)')
-
-    t_big    = big_mhz
-    t_little = round(2000 * t_big / 2200)
-    t_volt   = volt_mv if volt_mv is not None else _auto_volt(big_mhz)
-    t_floor     = floor_mhz
-    t_floor_thr = round(650 * t_floor / 750)
+    t_big     = big_mhz
+    t_big_thr = round(2000 * t_big / 2200)          # A76 throttle OPP (scales with --big)
+    t_volt    = volt_mv if volt_mv is not None else _auto_volt(big_mhz)
+    t_a55     = little_mhz if little_mhz else 2000   # A55 (LITTLE) cluster max
 
     # ── 24-byte OPP structs ──────────────────────────────────────────────────
 
@@ -254,9 +250,9 @@ def build_patches(big_mhz: int = 2200, volt_mv: int = None,
 
     # BIG high OPP throttle (stock 2000) — scales with --big
     big_thr_pat = _opp(2000, _BIG_THR_ADJ, _BIG_THR_LAT, BIG_FLAGS)
-    big_thr_rep = _opp(t_little, _BIG_THR_ADJ, _BIG_THR_LAT, BIG_FLAGS)
-    big_thr_desc = (f'BIG throttle OPP: 2000 → {t_little} MHz'
-                    if t_little != 2000 else 'BIG throttle OPP: 2000 MHz (stock)')
+    big_thr_rep = _opp(t_big_thr, _BIG_THR_ADJ, _BIG_THR_LAT, BIG_FLAGS)
+    big_thr_desc = (f'BIG throttle OPP: 2000 → {t_big_thr} MHz'
+                    if t_big_thr != 2000 else 'BIG throttle OPP: 2000 MHz (stock)')
 
     # BIG low OPP throttle (stock 1600) — scales with --big
     _big_lthr = round(1600 * t_big / 2200)
@@ -270,12 +266,12 @@ def build_patches(big_mhz: int = 2200, volt_mv: int = None,
     # Format: [big1 u16][big2 u16][little u16][pad u16][u32][lat_byte ...][u32]
 
     # compact_row_2000 (stock 2000) — controlled by --little
-    # little_a55 col (stock 650) scales proportionally with t_little
-    c2000_lit = round(650 * t_little / 2000)
+    # little_a55 col (stock 650) scales proportionally with t_big_thr
+    c2000_lit = round(650 * t_big_thr / 2000)
     c2000_pat  = 'd0 07 40 06 8a 02 00 00 00 00 00 00 9f 8f 67 00'
-    c2000_rep  = f'{_u16(t_little)} 40 06 {_u16(c2000_lit)} 00 00 00 00 00 00 {_compact_lat_byte(t_little)} 8f 67 00'
-    c2000_desc = (f'Compact row 2000: big→{t_little} little→{c2000_lit} MHz'
-                  if t_little != 2000 else 'Compact row 2000: 2000/650 MHz (stock)')
+    c2000_rep  = f'{_u16(t_big_thr)} 40 06 {_u16(c2000_lit)} 00 00 00 00 00 00 {_compact_lat_byte(t_big_thr)} 8f 67 00'
+    c2000_desc = (f'Compact row 2000: big→{t_big_thr} little→{c2000_lit} MHz'
+                  if t_big_thr != 2000 else 'Compact row 2000: 2000/650 MHz (stock)')
 
     # compact_row_2200 (stock 2200) — controlled by --big
     # little_a55 col (stock 725) scales proportionally with t_big
@@ -302,47 +298,29 @@ def build_patches(big_mhz: int = 2200, volt_mv: int = None,
                   + ('' if volt_mv is not None else ' (auto)')
                   if t_big != 2200 else f'EEMSN: 2200 MHz, {t_volt} mV (stock freq)')
 
-    # ── DVFS timer table (0x17b88) — controlled by --little ─────────────────
-    # dvfs_mhz=None → disabled (NOOP). dvfs_mhz=0 → auto-scale each entry from its
-    # own stock value. dvfs_mhz=N → top entry = N, lower scales proportionally.
-    _dvfs_en = dvfs_mhz is not None
-    if dvfs_mhz and dvfs_mhz != 0:
-        _dvfs2000 = dvfs_mhz
-        _dvfs1540 = round(1540 * dvfs_mhz / 2000)
-    else:
-        _dvfs2000 = round(2000 * t_big / 2200)
-        _dvfs1540 = round(1540 * t_big / 2200)
-    # ── LITTLE OPP structs (full 24-byte) ───────────────────────────────────
-    # LITTLE max OPP (stock 750 MHz) — 3 identical entries — controlled by --floor
-    lit_max_pat = _opp(750,  _LIT_MAX_ADJ, _LIT_MAX_LAT, LITTLE_FLAGS)
-    lit_max_rep = _opp(t_floor, _LIT_MAX_ADJ, _LIT_MAX_LAT, LITTLE_FLAGS)
-    lit_max_desc = (f'LITTLE max OPP: 750 → {t_floor} MHz'
-                    if t_floor != 750 else 'LITTLE max OPP: 750 MHz (stock)')
-
-    # LITTLE throttle OPP (stock 650 MHz) — 3 identical entries — scales with --floor
-    lit_thr_pat = _opp(650,  _LIT_THR_ADJ, _LIT_THR_LAT, LITTLE_FLAGS)
-    lit_thr_rep = _opp(t_floor_thr, _LIT_THR_ADJ, _LIT_THR_LAT, LITTLE_FLAGS)
-    lit_thr_desc = (f'LITTLE throttle OPP: 650 → {t_floor_thr} MHz'
-                    if t_floor_thr != 650 else 'LITTLE throttle OPP: 650 MHz (stock)')
-
+    # ── LITTLE (A55) anchors — scale with --little (A55 cluster max) ─────────
+    # DVFS-timer top (0x17b88) is the confirmed A55 max anchor.
+    _dvfs1540 = round(1540 * t_a55 / 2000)
     dvfs2000_pat = 'd0 07 6a 18 5c 01 00 00'
-    dvfs2000_rep = f'{_u16(_dvfs2000)} 6a 18 5c 01 00 00'
-    dvfs2000_desc = (f'DVFS timer 2000 → {_dvfs2000} MHz'
-                     if _dvfs_en and _dvfs2000 != 2000 else 'DVFS timer 2000 MHz (stock)')
+    dvfs2000_rep = f'{_u16(t_a55)} 6a 18 5c 01 00 00'
+    dvfs2000_desc = (f'LITTLE max (DVFS timer): 2000 → {t_a55} MHz'
+                     if t_a55 != 2000 else 'LITTLE max (DVFS timer): 2000 MHz (stock)')
     dvfs1540_pat = '04 06 6a 18 00 00 00 00'
     dvfs1540_rep = f'{_u16(_dvfs1540)} 6a 18 00 00 00 00'
-    dvfs1540_desc = (f'DVFS timer 1540 → {_dvfs1540} MHz'
-                     if _dvfs_en and _dvfs1540 != 1540 else 'DVFS timer 1540 MHz (stock)')
+    dvfs1540_desc = (f'LITTLE low (DVFS timer): 1540 → {_dvfs1540} MHz'
+                     if _dvfs1540 != 1540 else 'LITTLE low (DVFS timer): 1540 MHz (stock)')
 
-    # ── LITTLE min-freq FLOOR (EXPERIMENTAL) ─────────────────────────────────
-    # The [C] power/thermal-limit table @0x147f0 holds 4 records each starting
-    # with floor=500000 kHz (500 MHz). Rewrite that u32 (ALL 4). This is the
-    # thermal/power-budget floor; whether it moves cpufreq scaling_min_freq is
-    # UNVERIFIED (scaling_min is kernel/HW-owned) — flash & test on-device.
-    minfreq_pat = _u32(500000)
-    minfreq_rep = _u32(minfreq_lit * 1000) if minfreq_lit else _u32(500000)
-    minfreq_desc = (f'LITTLE min floor: 500 → {minfreq_lit} MHz (EXPERIMENTAL, [C] table x4)'
-                    if minfreq_lit else 'LITTLE min floor: 500 MHz (stock)')
+    # LITTLE governor throttle OPPs (750/650, FLAGS_B) — scale with A55 max.
+    _lit_max = round(750 * t_a55 / 2000)
+    _lit_thr = round(650 * t_a55 / 2000)
+    lit_max_pat = _opp(750, _LIT_MAX_ADJ, _LIT_MAX_LAT, LITTLE_FLAGS)
+    lit_max_rep = _opp(_lit_max, _LIT_MAX_ADJ, _LIT_MAX_LAT, LITTLE_FLAGS)
+    lit_max_desc = (f'LITTLE throttle-max OPP: 750 → {_lit_max} MHz'
+                    if _lit_max != 750 else 'LITTLE throttle-max OPP: 750 MHz (stock)')
+    lit_thr_pat = _opp(650, _LIT_THR_ADJ, _LIT_THR_LAT, LITTLE_FLAGS)
+    lit_thr_rep = _opp(_lit_thr, _LIT_THR_ADJ, _LIT_THR_LAT, LITTLE_FLAGS)
+    lit_thr_desc = (f'LITTLE throttle OPP: 650 → {_lit_thr} MHz'
+                    if _lit_thr != 650 else 'LITTLE throttle OPP: 650 MHz (stock)')
 
     return [
         PatchStage('little_max_opp',    lit_max_pat,  lit_max_rep,
@@ -357,12 +335,8 @@ def build_patches(big_mhz: int = 2200, volt_mv: int = None,
         PatchStage('compact_row_2200',  c2200_pat,    c2200_rep,    description=c2200_desc),
         PatchStage('compact_row_1540',  c1540_pat,    c1540_rep,    description=c1540_desc),
         PatchStage('eemsn',             eemsn_pat,    eemsn_rep,    description=eemsn_desc),
-        PatchStage('dvfs_timer_2000',   dvfs2000_pat, dvfs2000_rep if _dvfs_en else dvfs2000_pat,
-                   description=dvfs2000_desc),
-        PatchStage('dvfs_timer_1540',   dvfs1540_pat, dvfs1540_rep if _dvfs_en else dvfs1540_pat,
-                   description=dvfs1540_desc),
-        PatchStage('minfreq_little_floor', minfreq_pat, minfreq_rep,
-                   match_mode=MatchMode.ALL, description=minfreq_desc),
+        PatchStage('dvfs_timer_2000',   dvfs2000_pat, dvfs2000_rep, description=dvfs2000_desc),
+        PatchStage('dvfs_timer_1540',   dvfs1540_pat, dvfs1540_rep, description=dvfs1540_desc),
     ]
 
 
@@ -416,8 +390,7 @@ def apply_patch(data: bytearray, stage: PatchStage) -> int:
 
 def patch_image(input_path: str, output_path: str,
                 big_mhz: int = 2200, volt_mv: int = None,
-                thermal_c: int = None, dvfs_mhz: int = None,
-                floor_mhz: int = 750, minfreq_lit: int = None,
+                thermal_c: int = None, little_mhz: int = None,
                 no_thermal: bool = False, dry_run: bool = False,
                 sign: bool = False, wrap: bool = False,
                 skip: Optional[List[str]] = None):
@@ -428,13 +401,11 @@ def patch_image(input_path: str, output_path: str,
     fw_id = read_fw_id(raw)
     print(f"Input  : {input_path}  ({len(raw)} bytes)")
     print(f"FW ID  : {fw_id}")
-    print(f"BIG    : {big_mhz} MHz{'  (stock)' if big_mhz == 2200 else ''}")
-    _ft  = round(650 * floor_mhz / 750)
-    print(f"FLOOR  : opp_max={floor_mhz} opp_thr={_ft} MHz{'  (stock)' if floor_mhz == 750 else ''}")
+    print(f"BIG    : {big_mhz} MHz (A76){'  (stock)' if big_mhz == 2200 else ''}")
+    _lm = little_mhz if little_mhz else 2000
+    print(f"LITTLE : {_lm} MHz (A55){'  (stock)' if _lm == 2000 else ''}")
     _v = volt_mv if volt_mv is not None else _auto_volt(big_mhz)
     print(f"VOLT   : {_v} mV{'  (auto)' if volt_mv is None else '  (override)'}")
-    if minfreq_lit:
-        print(f"MINFREQ: LITTLE floor 500 → {minfreq_lit} MHz  (EXPERIMENTAL, unverified)")
     if thermal_c is None:
         _th, _tl = _auto_thermal(big_mhz)
         _tlabel = '(auto)'
@@ -448,7 +419,7 @@ def patch_image(input_path: str, output_path: str,
     stages: List[PatchStage] = []
     if not no_thermal:
         stages += thermal_patches(thermal_c, big_mhz)
-    stages += build_patches(big_mhz, volt_mv, dvfs_mhz, floor_mhz, minfreq_lit)
+    stages += build_patches(big_mhz, volt_mv, little_mhz)
 
     errors = []
     for stage in stages:
@@ -506,17 +477,11 @@ examples:
                     help='Target BIG MHz; all entries scale from this (default: 2200 = stock)')
     ap.add_argument('--volt',       type=int, default=None, metavar='MV',
                     help='EEMSN voltage mV (default: auto-scaled from --big; stock: 1024)')
-    ap.add_argument('--floor',      type=int, default=750, metavar='MHZ',
-                    help='LITTLE floor MHz: sets max LITTLE OPP; throttle scales proportionally '
-                         '(default: 750 = stock). Both scale from this.')
-    ap.add_argument('--little',     type=int, nargs='?', const=0, default=None, metavar='MHZ',
-                    help='Patch DVFS timer entries. No value = auto-scale each from its stock freq. '
-                         'MHZ = override top entry (2000) to MHZ, lower scales proportionally.')
+    ap.add_argument('--little',     type=int, default=None, metavar='MHZ',
+                    help='LITTLE (A55) cluster max MHz; scales the A55 DVFS-timer top and the '
+                         'LITTLE governor throttle OPPs (default: 2000 = stock)')
     ap.add_argument('--thermal',    type=int, default=None, metavar='C',
                     help='Thermal trip ceiling °C (default: auto-scaled from --big; stock: 95/85)')
-    ap.add_argument('--minfreq-lit', type=int, default=None, metavar='MHZ',
-                    help='EXPERIMENTAL: LITTLE min-freq floor MHz — rewrites the 500000 kHz '
-                         'floor in the [C] table (x4). Unverified vs scaling_min_freq; test on-device.')
     ap.add_argument('--sign', action='store_true',
                     help='Re-sign output via cert_bypass (EXPERIMENTAL/untested on-device)')
     ap.add_argument('--wrap', action='store_true', help='cert2 WRAP mode (default: OVERRIDE)')
@@ -531,8 +496,8 @@ examples:
     args = ap.parse_args()
 
     if args.list:
-        stages = ([] if args.no_thermal else thermal_patches(args.thermal)) + build_patches(args.big, args.volt, args.little, args.floor, args.minfreq_lit)
-        print(f"Plan  --big={args.big}  --volt={args.volt}  --thermal={args.thermal}  --little={args.little if args.little is not None else 'off'}  --minfreq-lit={args.minfreq_lit}:")
+        stages = ([] if args.no_thermal else thermal_patches(args.thermal)) + build_patches(args.big, args.volt, args.little)
+        print(f"Plan  --big={args.big}  --little={args.little if args.little is not None else 2000}  --volt={args.volt}  --thermal={args.thermal}:")
         for s in stages:
             tag = 'noop ' if s.is_noop else 'PATCH'
             print(f"  [{tag}] {s.name}: {s.description}")
@@ -548,9 +513,7 @@ examples:
         big_mhz=args.big,
         volt_mv=args.volt,
         thermal_c=args.thermal,
-        dvfs_mhz=args.little,
-        floor_mhz=args.floor,
-        minfreq_lit=args.minfreq_lit,
+        little_mhz=args.little,
         no_thermal=args.no_thermal,
         dry_run=args.dry_run,
         sign=args.sign,
