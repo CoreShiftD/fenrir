@@ -305,7 +305,7 @@ Concrete next work:
    EEM regs `0x11c101a4` and `0x11c10090`, extracts their top byte, and caches
    the aging/SVS value at global `0x17af0`.
 2. Locate the call site or indirect logging path for the EEMSN strings,
-   especially payload offset `0x12cd4` (`vboot violate`). Plain pointer xrefs
+   especially payload offset `0x12cc1` (`vboot violate` in A75 payload). Plain pointer xrefs
    did not find it, so force function starts around suspected log-call sites or
    emulate callers of `~0x3a1e`.
 3. Find the comparison that gates boot/requested volt+freq against the aging
@@ -328,17 +328,25 @@ Concrete next work:
 | shared handoff buf | 0x11340c | destination for parsed shadow table, consumed cross-core |
 | header/footer cookie | 0x17c3a6b4 | validates `pi_img` payload integrity |
 
-## Reference offsets in mcupm payload (RV32, GFH stripped, base 0)
+## Reference offsets in mcupm payload — AVERIFIED against A75 `bin/firmware/a75/mcupm.img` (GFH-stripped, base 0)
 
-| string | file offset |
+⚠ Flagship A75 payload offsets below — if you analyze a different device's
+mcupm, re-verify with `strings -t x` on the stripped payload. The original
+offsets in earlier notes differed by 0x13 (offsets in the A75 payload are
+consistently 19 bytes earlier than the earlier session's offsets).
+
+Payload md5: `d56e48ebc91543742185037c1b7045fc`
+
+| string | A75 payload offset |
 |---|---|
 | `pi_img` | 0x12e2c |
-| `[CPU][EEMSN]id:%d, vboot violate` | 0x12cd4 |
-| `[CPU][EEMSN]get eemsn_init_semphr err` | 0x12cad |
-| `[CPU][EEMSN]id:%d, orig volt:0x%x` | 0x133ae |
-| `[CPU][EEMSN]SN irq request failed` | 0x13574 |
-| `[CPU][EEMSN]eemsn_main SPMC ready, sn_aging_status:%d, timerChkCnt:%d, check_tmp_cnt:%d` | 0x13a5a |
-| `[CPU][EEMSN]eemsn_main, sn_aging_status:%d, timerChkCnt:%d` | 0x13ab3 |
+| `[CPU][EEMSN]id:%d, vboot violate` | **0x12cc1** |
+| `[CPU][EEMSN]get eemsn_init_semphr err` | **0x12c9a** |
+| `[CPU][EEMSN]id:%d, orig volt:0x%x` | **0x1339b** |
+| `[CPU][EEMSN]SN irq request failed` | **0x13561** |
+| `[CPU][EEMSN]eemsn_main SPMC ready, ...` | **0x13a47** |
+| `[CPU][EEMSN]eemsn_main, sn_aging_status:%d, ...` | **0x13aa0** |
+| `[CPU][EEMSN]NULL eemsn_init_semphr!` | 0x13a22 |
 
 Older notes quoted offsets from the GFH-wrapped `mcupm.bin`; use the stripped
 payload offsets above for disassembly and script work.
@@ -408,15 +416,18 @@ Both gates handled; **on-device acceptance of the forged cert2 remains untested.
 ## 7. EEMSN consumer trace in mcupm (RISC-V) — partial, this session
 
 Goal: find the encoding/unit of pi_img shadow values so a friendly `--freq/--volt`
-knob is possible. Disassembled `/tmp/mcupm_payload.bin` (RV32, base 0) w/ capstone.
+knob is possible. Disassembled `/tmp/mcupm_payload.bin` (RV32, base 0) w/ r2 + capstone.
 
 Confirmed:
 - **gp = 0** (set at code 0x108 `mv gp, zero`) — no gp-relative addressing.
-- **pi_img config key** loaded at code 0xba10 (matches §4d `fcn.0000ba0a`).
-- **EEM hardware layer** at fn ~0x3a1e: reads EEM regs **0x11c101a4** and
-  **0x11c10090**, extracts the TOP byte (`srli aX, 0x18`) — an aging/SVS value —
-  and caches it to global **0x17af0**. i.e. pi_img's shadowed values arrive in
-  the `0x11c1_xxxx` EEM registers as **hardware-encoded aging bytes, NOT MHz/mV**.
+- **pi_img config key** loaded at code 0xba0e/0xba10 (matches §4d `fcn.0000ba0a`).
+- **EEM hardware layer** at 0x3a96 (NOT 0x3a1e as earlier — the function at 0x3a1e is
+  a different arithmetic helper, not the EEM reader): builds address **0x11c101a4**
+  via `lui a0, 0x11c10; addi a0, a0, 420`, does an atomic load (`lr.w`), extracts
+  the TOP byte (`srli a2, a0, 0x18`) — an aging/SVS value — and caches it to
+  global **0x17af0** (`sw a2, -1296(s2)` with `s2 = 0x18000`).
+  i.e. pi_img's shadowed values arrive in the `0x11c1_xxxx` EEM registers as
+  **hardware-encoded aging bytes, NOT MHz/mV**.
   → This is why `pi_img_devices.py` refuses `--set-reg ...=2600mhz`: there is no
     clean unit→byte formula; the values are raw EEM encodings.
 
@@ -474,24 +485,146 @@ exact EEMSN comparison that leads to `vboot violate`.
 Additional A75 mcupm trace notes:
 
 - Corrected RISC-V address reconstruction must treat `c.lui` immediates as
-  `imm << 12`. With that fix, only two relevant direct string loads were found:
-  - `0xba0e/0xba10` -> `0x12e2c` (`pi_img`)
-  - `0xa1d8/0xa1dc` -> `0x12e52` (the adjacent mcdi discard-event string)
-- No corrected `lui`/`c.lui` + `addi` direct load points at `0x12cd4`
-  (`vboot violate`), `0x12cad` (EEMSN semaphore error), `0x133ae` (`orig volt`),
-  or the `sn_aging_status` strings. This supports the indirect log-id / pointer
-  table theory rather than a missed simple xref.
+  `imm << 12`. With that fix, only one relevant direct string load was found:
+  - `0xba0e/0xba10`: `c.lui a0, 0x13; addi a0, a0, -468` -> `0x12e2c` (`pi_img`)
+- No `lui`/`c.lui` + `addi` combination anywhere in the payload targets any of
+  the `[CPU][EEMSN]...` error strings (0x12c9a vboot, 0x1339b orig volt, etc.).
+  This is not a missed xref — the strings simply are NOT loaded by direct
+  address arithmetic in this firmware. Supports the indirect log-id / pointer
+  table theory: EEMSN messages are dispatched by an integer log ID that indexes
+  into a string table, and the printf/log function retrieves the string by
+  table lookup, not by inline LUI+ADDI.
 - r2 confirms the EEM reader around `0x3a96`: it builds `0x11c101a4`, does an
-  atomic read, shifts right by 24, and stores the top byte to `0x17af0`
-  (`lui s2,0x18; sw ..., -1296(s2)`).
+  atomic read (`lr.w`), shifts right by 24, and stores the top byte to `0x17af0`
+  (`lui s2, 0x18; sw ..., -1296(s2)`).
 
-Not yet cracked (next steps):
-- The `"vboot violate"` format string (payload 0x12cd4) and its siblings are NOT
-  referenced by corrected direct string loads or by any absolute pointer-pool
-  word found — the code that emits them is either reached via an indirect/log-id
-  dispatch or sits in a region that desynced under linear capstone decode.
-  Locating that comparison is the missing piece that would name which EEM byte =
-  the OC ceiling.
-- Suggested: re-disassemble with r2 forcing function boundaries at the EEMSN
-  log-call sites, or emulate (esil) fn ~0x3a7a/0x3a96 callers to find the compare
-  that gates on the `0x17af0` aging byte vs. the requested boot volt/freq.
+### 7b. Aging cache / config-key loader function — decodes to ~0x3a7e
+
+The function starting around `0x3a7e` is the **aging-value caching wrapper**
+(read-once from EEM hardware, cache at `0x17af0` for the rest of boot).
+Disassembly (r2, RV32, base 0):
+
+```
+0x3a7e: mv   s0, a1            ; save args
+0x3a80: mv   s1, a0
+0x3a82: lw   a0, 12(a0)        ; load struct fields
+0x3a84: lw   a1, 8(a1)
+0x3a86: ...                    ; (4-byte op, mul/div arithmetic)
+0x3a8a: lw   a2, 0(a2)         ; load cached-marker
+0x3a8c: bnez a2, 0x3ace        ; if non-zero, skip to tail (already cached)
+0x3a8e: lui  s2, 0x18          ; s2 = 0x18000 (global base for 0x17af0)
+0x3a90: lw   a2, -1296(s2)     ; load current aging byte from 0x17af0
+0x3a94: bnez a2, 0x3ab2        ; if already cached, skip EEM read
+0x3a96: lui  a0, 0x11c10       ;  \ build EEM reg 0x11c101a4
+0x3a9a: addi a0, a0, 420       ;  /
+0x3a9e: jal  ra, 0x649a        ; call EEM reg-access helper
+0x3aa2: lr.w a0, (a0)          ; atomic load from 0x11c101a4
+0x3aa6: srli a2, a0, 0x18      ; extract TOP byte = aging value
+0x3aaa: sw   a2, -1296(s2)     ; CACHE aging byte at 0x17af0
+0x3aae: lw   a0, 12(s1)        ; reload struct fields
+0x3ab0: lw   a1, 8(s0)
+0x3ab2: li   a3, 60            ; a3 = 60 (??? threshold constant?)
+0x3ab6: ...                    ; (4-byte op, compare arithmetic)
+0x3aba: ...                    ; (4-byte op)
+0x3abe: sw   a3, -1296(s2)     ; ALSO cache a3=60 at 0x17af0 (overwrite?)
+0x3ac2: sw   a3, 0(a0)         ; store 60 to struct field
+0x3ac4: lw   a2, 20(s1)        ; load function pointer from struct
+0x3ac6: beqz a2, 0x3ace        ; if null, skip indirect call
+0x3ac8: mv   a0, s1
+0x3aca: mv   a1, s0
+0x3acc: jalr a2                ; call the indirect handler
+0x3ace: ...                    ; tail/return path
+```
+
+Key observations:
+- Two values are stored to `0x17af0`: the aging byte (top byte of `0x11c101a4`),
+  AND the constant `60` (0x3c). The second store at `0x3abe` **overwrites**
+  the aging byte with `60` — but note the `beqz a2` at `0x3a94` skips
+  the EEM read entirely when the cache is already filled. So on first call:
+  the aging byte is written at `0x3aaa`, then immediately overwritten with `60`
+  at `0x3abe`. This means `60` is NOT the aging value — it may be a
+  "read-complete" sentinel or a default.
+- The `li a3, 60` constant (`60` = 0x3C) appears in every firmware build as a
+  fixed threshold — its meaning is unclear (seconds? a counter limit?).
+- The config-key loader at `0xba0a` calls `0x253c` (an indirect trampoline
+  wrapper that saves callee-saved regs and jumps through `t0`), loads `pi_img`
+  string via `c.lui a0, 0x13; addi a0, a0, -468 -> 0x12E2C`, then calls
+  `fcn.0xba28` which iterates the config-key struct.
+
+### 7c. EEM descriptor pointer tables discovered at 0x15f00+
+
+The string region `0x12C00-0x13C00` contains 42 identified strings
+(FreeRTOS task names, EEM descriptor names, file paths, etc.). Among them:
+
+| payload offset | string |
+|---|---|
+| 0x138dc | `EEM_DET_L` |
+| 0x13163 | `EEM_DET_B` |
+| 0x135b5 | `EEM_DET_CCI` |
+| 0x13552 | `top_data_share` |
+| 0x12fab | `vproc1` |
+| 0x131bf | `vproc2` |
+| 0x1307b | `vsram_proc1` |
+| 0x13028 | `vsram_proc2` |
+| 0x12f68 | `mcdi_write_bus` |
+| 0x12ff0 | `EEMR` |
+
+These strings ARE referenced by a pointer table at the following offsets
+(each entry is a 32-bit LE pointer to the string):
+
+| pointer table offset | points to | description |
+|---|---|---|
+| 0x15f00 | 0x138dc (`EEM_DET_L`) | EEM detection struct LITTLE |
+| 0x15fe4 | 0x13163 (`EEM_DET_B`) | EEM detection struct BIG |
+| 0x160c8 | 0x135b5 (`EEM_DET_CCI`) | EEM detection CCI |
+| 0x169f4 | 0x13552 (`top_data_share`) | shared data region |
+| 0x17278 | 0x12fab (`vproc1`) | voltage proc 1 |
+| 0x17284 | 0x131bf (`vproc2`) | voltage proc 2 |
+| 0x17290 | 0x1307b (`vsram_proc1`) | SRAM voltage proc 1 |
+| 0x1729c | 0x13028 (`vsram_proc2`) | SRAM voltage proc 2 |
+| 0x1759c | 0x138cb (UID hash) | unique chip identifier |
+
+These are EEM/DVFS per-domain detection descriptor structs, each containing
+a name pointer + calibration data. The struct stride between entries
+(12-16 bytes between pointer table entries) suggests a struct like
+`{char *name, u32 reg_base, u32 threshold, ...}`.
+
+The `[CPU][EEMSN]...` error strings (0x12c9a, 0x12cc1, etc.) are NOT in any
+pointer table — they sit in the data section as isolated null-terminated
+strings, accessible only through a log-ID dispatch layer.
+
+## 8. Current status — what is still missing
+
+The exact comparison that gates `"vboot violate"` remains unlocated.
+Confirmed:
+
+1. **EEM aging reader** at 0x3a96-0x3aaa: reads `0x11c101a4`, extracts top
+   byte, caches to `0x17af0` (but immediately overwritten with `0x3c`).
+2. **pi_img config-key loader** at 0xba0a: LUI+ADDI loads `"pi_img"` from
+   `0x12E2C`, calls config-key iterator at 0xba28, which populates shared
+   structures.
+3. **EEMSN error strings** at 0x12cc1 (vboot) and 0x12c9a (sem err) are NOT
+   reachable by any direct pointer or LUI+ADDI sequence in the entire binary.
+   They must be dispatched through an indirect log-ID mechanism: the code
+   calls a printf-like function with a small integer ID, and that function
+   looks up the string from a table indexed by ID.
+4. **EEM descriptor pointer tables** at 0x15f00+ reference the per-domain
+   EEM detection strings by direct 32-bit pointer, but these cover only
+   hardware-detection names (EEM_DET_L/B/CCI), not error messages.
+
+The missing comparison therefore lives in the code that:
+- Reads the cached aging byte (or the `0x11c1xxxx` EEM registers directly),
+- Compares it against the requested OPP frequency/voltage,
+- Calls the log-ID dispatch with ID for vboot-violate when the check fails.
+
+Finding it requires either:
+- (a) Tracing callers of the aging cache function at 0x3a7e upward to find
+  the freq/volt comparison, or
+- (b) Finding the log-ID dispatch function and backward-tracing to the
+  comparison call site, or
+- (c) Dynamic analysis: instrument the firmware to dump the log ID and
+  comparison values at boot.
+
+Strategy (b) is likely more tractable: locate the log function used by the
+EEMSN code by looking for format-string dispatch patterns (a function that
+takes an integer ID and a variable arg list, and emits `"[CPU][EEMSN]..."`).

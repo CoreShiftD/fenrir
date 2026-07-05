@@ -2,11 +2,29 @@
 pi_img_devices.py — KRAKEN pi_img.bin calibration-image patcher (MT6789).
 
 Companion to mcupm_devices.py. Where mcupm.img holds the CPU DVFS OPP-limit
-tables, pi_img.bin supplies the per-chip aging/SLT/MC50/LUT calibration envelope
-that bl2_ext.bin's KRAKEN loader stages into shared SRAM (0x11340C), which
-mcupm's EEMSN module reads to validate voltage/frequency pairs at boot. The
-"[CPU][EEMSN]...vboot violate" refusal — the gate that rejects CPU OC past a
-threshold — is driven from this data. Full analysis: PI_IMG_KRAKEN_NOTES.md.
+tables, pi_img.bin supplies the per-chip **calibration envelope** (LUT/MC50/SLT
+coefficients) that bl2_ext.bin's KRAKEN loader stages into shared SRAM (0x11340C),
+which mcupm's EEMSN module reads. The "[CPU][EEMSN]...vboot violate" refusal
+that blocks CPU OC is NOT driven by a value in pi_img — see below.
+
+Full analysis: PI_IMG_KRAKEN_NOTES.md.
+
+════════════════════════════════════════════════════════════════════
+ CRITICAL: pi_img does NOT contain the aging OC cap  (found Dec 2024)
+════════════════════════════════════════════════════════════════════
+  Reverse-engineering of mcupm's EEMSN validator (mcupm_payload.bin) shows:
+    • The aging byte that gates "vboot violate" is read from EEM **hardware
+      register 0x11c101a4** (top byte, extracted via srli by 24 at code 0x3aa6)
+      and cached to mcupm's global 0x17af0 — NOT from a pi_img shadow write.
+    • pi_img.bin's 0x11c10580 shadow writes (4 groups × 4 cores = 16 occurrences)
+      are per-core DVFS calibration/LUT coefficients, NOT frequency caps.
+    • The effective OC ceiling lives in mcupm's EEMSN freq+volt struct at file
+      offset 0x17cb4 (handled by mcupm_devices.py --big / --volt), which is
+      validated against the hardware aging register during boot.
+
+  Therefore: **patching pi_img.bin is NOT the right mechanism to raise the CPU
+  OC ceiling.** Use mcupm_devices.py or patch_cpu_opp.py for that. This tool
+  exists for calibration experiments and safe inspection — not cap bypass.
 
 ════════════════════════════════════════════════════════════════════
  TWO PROTECTION GATES  (both handled by this tool)
@@ -14,7 +32,7 @@ threshold — is driven from this data. Full analysis: PI_IMG_KRAKEN_NOTES.md.
   1. Outer MTK GFH / cert2 RSA signature (REAL cryptography). Any payload
      edit invalidates it → the device rejects the image. Bypassed by forging
      a cert2 the verifier accepts, via the local cert_bypass helper (OVERRIDE/WRAP).
-     This tool ALWAYS re-signs on --write.
+     This tool ALWAYS re-sings on --write.
   2. Inner KRAKEN cookie 0x17C3A6B4 at payload[0] and payload[-4] (not crypto).
      Must stay byte-identical AND at the same relative offset. Therefore every
      edit here (a) touches only payload[4:-4], (b) keeps the length constant.
@@ -33,28 +51,25 @@ liblk strips/rebuilds the outer GFH wrapper, so `partition.data` is exactly the
       Notable decoded content (payload-relative):
         0x50/0x6c/0x88 : 28B per-domain records, id = 1/3/2
         0x1b8/0x1f4/0x238/0x2ac : reg-shadow  0x11c10580 <- 0x00001000
-          (0x11c1_xxxx = MTK EEM/PTP-OD CPU-DVFS/aging controller block)
-  off 0x300..0x2f20    per-chip aging/SLT/MC50/LUT envelope plus repeated
+          (0x11c1_xxxx = MTK EEM/PTP-OD CPU-DVFS/calibration controller block)
+  off 0x300..0x2f20    per-chip calibration envelope (LUT/MC50/SLT) plus repeated
       structured islands. A75 has aligned 0x11c10580 shadow writes at
       payload value offsets 0x1bc/0x1f8/0x23c/0x2b0, 0xa4c/0xa88/0xacc/0xb40,
       0x12dc/0x1318/0x135c/0x13d0, 0x1ca4/0x1ce0/0x1d24/0x1d98, and
-      0x266c/0x26a8/0x26ec/0x2760. These are hardware-encoded raw values,
-      not MHz/mV.
+      0x266c/0x26a8/0x26ec/0x2760. These are per-core DVFS LUT calibration,
+      not MHz/mV and NOT the aging OC cap.
   off 0x2f20 (len-4)   footer cookie  0x17C3A6B4
 
 ════════════════════════════════════════════════════════════════════
- WHERE THE OC CAP LIVES  (NOT yet byte-pinned — see PI_IMG_KRAKEN_NOTES §6c)
+ WHAT THIS TOOL IS FOR
 ════════════════════════════════════════════════════════════════════
-  The exact value the EEMSN "vboot violate" check compares against is not yet
-  proven. Confirming it needs disassembly of mcupm's EEMSN validator (the
-  consumer). Until a field is identified WITH CONFIDENCE, this tool enables NO
-  cap patch by default — matching mcupm_devices.py's "no-op at stock, opt-in,
-  never guess firmware bytes" philosophy. It gives you:
-    --dump            decode/inspect the register-shadow table + entropy map
-    --set  OFF=HEX    raw byte patch inside the cookie-safe range (opt-in)
-    --set-reg A=V     rewrite the value of a register-shadow pair (opt-in)
-    --write           re-sign (cert_bypass) and save a flashable image
-  so you can run controlled OC experiments and diff working/non-working dumps.
+  • --dump        decode/inspect the register-shadow table + entropy map
+  • --set OFF=HEX raw byte patch (opt-in, for calibration experiments)
+  • --set-reg A=V rewrite the value of a register-shadow pair (opt-in)
+  • --write       re-sign (cert_bypass) and save a flashable image
+  • **Do NOT use this tool to bypass the CPU OC ceiling.** Use
+    patch_cpu_opp.py --big for that. Patching 0x11c10580 values will only
+    change LUT calibration coefficients — not the aging cap.
 
 Requires the liblk venv:  /opt/src/fenrir/.venv/bin/python3 pi_img_devices.py ...
 
@@ -176,7 +191,7 @@ def dump(payload: bytearray):
     print("\nentropy map (256B blocks):")
     for off in range(0, n, 0x100):
         e = _entropy(payload[off:off + 0x100])
-        tag = 'structured' if e < 4.5 else ('transition' if e < 6.0 else 'aging/calib')
+        tag = 'structured' if e < 4.5 else ('transition' if e < 6.0 else 'LUT/calib')
         print(f"  0x{off:04x}  {e:4.2f}  {tag}")
 
     end = scan_end(payload)
@@ -199,17 +214,19 @@ def dump(payload: bytearray):
 def parse_num(s: str) -> int:
     """User-friendly integer: hex (0x..), decimal, '_' separators, and k/M/G
     decimal multipliers (8k = 8000). Unit suffixes (mhz/khz/mv/v) are REFUSED —
-    the pi_img shadow values are hardware-encoded EEM aging bytes (they land in
-    0x11c1xxxx EEM registers, top byte = aging value; see PI_IMG_KRAKEN_NOTES.md
-    §6c), NOT a plain MHz/mV number, so no honest unit conversion exists yet."""
+    the pi_img 0x11c10580 shadow values are per-core DVFS LUT calibration
+    coefficients, NOT MHz/mV and NOT the aging OC cap (which comes from EEM HW
+    register 0x11c101a4, not pi_img). So no honest MHz/mV conversion exists here.
+    Use patch_cpu_opp.py --big for raising the CPU ceiling."""
     s0 = s.strip().replace('_', '')
     low = s0.lower()
     for u in ('mhz', 'khz', 'mv', 'ghz', 'v'):
         if low.endswith(u):
             raise ValueError(
-                f"unit '{u}' not supported: pi_img fields are hardware-encoded EEM "
-                f"aging values, not {u.upper()} — cannot convert '{s}' safely yet. "
-                f"Use a raw hex/dec value. (Trace EEMSN first; see notes §6c.)")
+                f"unit '{u}' not supported: pi_img's 0x11c10580 values are per-core "
+                f"LUT calibration coefficients, not {u.upper()} — they are NOT the "
+                f"aging OC cap (that lives in EEM HW 0x11c101a4). Use "
+                f"patch_cpu_opp.py --big for CPU OC.")
     mult = 1
     if not low.startswith('0x') and low[-1:] in ('k', 'm', 'g'):
         mult = {'k': 1000, 'm': 1_000_000, 'g': 1_000_000_000}[low[-1]]
@@ -246,6 +263,16 @@ def parse_set_reg(spec: str, payload: bytearray) -> List[BytePatch]:
         raise RuntimeError(
             f"--set-reg 0x{addr:08x}: not found in the cookie-safe aligned payload "
             f"[0x4, {hex(end)}) — inspect with --dump first")
+
+    # Safety guard: known LUT registers are NOT the OC cap
+    _LUT_CALIB = (0x11c10580,)
+    if addr in _LUT_CALIB:
+        print(f"\n  *** SAFETY: 0x{addr:08x} is a per-core LUT calibration register.")
+        print(f"  *** Changing it adjusts DVFS calibration coefficients, NOT the OC ceiling.")
+        print(f"  *** The aging cap that gates 'vboot violate' is in EEM HW 0x11c101a4,")
+        print(f"  *** read by mcupm at boot — not controlled by pi_img.")
+        print(f"  *** To raise the CPU ceiling, use: patch_cpu_opp.py --big <MHZ>\n")
+
     newv = struct.pack('<I', val)
     return [BytePatch(off=off + 4, data=newv,
                       name=f'reg@0x{addr:08x}#{i}')
