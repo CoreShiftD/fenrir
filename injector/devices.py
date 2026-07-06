@@ -815,12 +815,28 @@ DEVICES = [
             },
             'gpufreq': {
                 'bp': True,
-                'oc': 1200,
-                'volt': 800,
+                'oc': 1900,
+                'volt': None,
                 'floor_volt': 583,
                 'offset': None,
                 'skip': [],
             },
+            # Ensure every camera sensor exposes RAW + BURST_CAPTURE via
+            # dynamic trampoline in the PLT[0] cave (see patch_raw_capability.py).
+            # Sensible for this device; adjust tier for others as needed.
+            'metastore': {
+                'tier': 'RAW,MANUAL_SENSOR',
+                'allow_replace': False,   # fallback to single-slot when no BIND_NOW
+            },
+            # Inject RAW16 entries into recommended stream configurations
+            # via an AArch64 trampoline in updateRecommendedStreamConfiguration.
+            'metastore_raw16': {
+                'width': 4352,
+                'height': 2448,
+            },
+            # Patch libmtkcam_3rdparty.customer.so to add raw/DNG scenario
+            # feature bits (bit 35 + 36) at the vendor metadata tag check.
+            '3rdparty': True,
             'gpt': {
                 'storage': 'ufs',
                 'disk_size': 511839305728,

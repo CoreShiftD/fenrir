@@ -8,9 +8,14 @@ modified image. Opt-in from build.sh via `--firmware`.
 
     build.sh <device> [bootloader] --firmware
         └─> patch_firmware.py <device>
-              ├─ mcupm_devices.py  mcupm.img  <dev>-mcupm.img   (--big/--floor/--sign …)
-              ├─ pi_img_devices.py pi_img.bin <dev>-pi_img.bin  (--set-reg/--write …)
-              └─ patch_gpufreq.py mtk_gpufreq_mt6789.ko <dev>-gpufreq.ko (--bp/--oc …)
+              ├─ mcupm_devices.py        mcupm.img         <dev>-mcupm.img
+              ├─ pi_img_devices.py       pi_img.bin        <dev>-pi_img.bin
+              ├─ patch_gpufreq.py        mtk_gpufreq.ko    <dev>-gpufreq.ko
+              └─ patch_raw_capability.py libmtkcam_meta..so <dev>-libmtkcam_meta..so
+
+Camera metastore tier: defined in devices.py as metastore={'tier': 'RAW,BURST_CAPTURE', ...}.
+Ensures every sensor exposes the given capability tier, appending missing caps via
+a trampoline in the .text→.plt cave (BIND_NOW required).
 
 Every knob defaults to no-op; a partition with no actionable value or a missing
 input image is SKIPPED. Nothing is flashed — this only produces files.
@@ -85,14 +90,64 @@ def _gpufreq_actionable(cfg):
             cfg.get('offset') is not None or bool(cfg.get('skip')))
 
 
+def _metastore_args(cfg):
+    a = []
+    tier = cfg.get('tier')
+    if tier:
+        a += ['--tier', tier]
+    if cfg.get('allow_replace'):
+        a += ['--allow-replace']
+    return a
+
+
+def _metastore_actionable(cfg):
+    return bool(cfg.get('tier'))
+
+
+def _thirdparty_args(cfg):
+    return []
+
+
+def _thirdparty_actionable(cfg):
+    return bool(cfg)
+
+
+def _metastore_raw16_args(cfg):
+    a = ['--mode', 'metastore-raw16']
+    if cfg.get('width') is not None:
+        a += ['--width', str(cfg['width'])]
+    if cfg.get('height') is not None:
+        a += ['--height', str(cfg['height'])]
+    return a
+
+
+def _metastore_raw16_actionable(cfg):
+    return bool(cfg)
+
+
 PARTS = {
-    'mcupm':  dict(inp='mcupm.img',  out='{dev}-mcupm.img',  tool='mcupm_devices.py',
-                   args=_mcupm_args,  actionable=_mcupm_actionable),
-    'pi_img': dict(inp='pi_img.bin', out='{dev}-pi_img.bin', tool='pi_img_devices.py',
-                   args=_pi_img_args, actionable=_pi_img_actionable),
-    'gpufreq': dict(inp='mtk_gpufreq_mt6789.ko', out='{dev}-gpufreq.ko',
-                    tool='patch_gpufreq.py', args=_gpufreq_args,
-                    actionable=_gpufreq_actionable),
+    'mcupm':    dict(inp='mcupm.img',  out='{dev}-mcupm.img',
+                     tool='mcupm_devices.py',
+                     args=_mcupm_args,  actionable=_mcupm_actionable),
+    'pi_img':   dict(inp='pi_img.bin', out='{dev}-pi_img.bin',
+                     tool='pi_img_devices.py',
+                     args=_pi_img_args, actionable=_pi_img_actionable),
+    'gpufreq':  dict(inp='mtk_gpufreq_mt6789.ko', out='{dev}-gpufreq.ko',
+                     tool='patch_gpufreq.py',
+                     args=_gpufreq_args, actionable=_gpufreq_actionable),
+    'metastore': dict(inp='libmtkcam_metastore.so',
+                      out='{dev}-libmtkcam_metastore.so',
+                      tool='patch_raw_capability.py',
+                      args=_metastore_args, actionable=_metastore_actionable),
+    'metastore_raw16': dict(inp='libmtkcam_metastore.so',
+                            out='{dev}-libmtkcam_metastore.so',
+                            tool='patch_raw_3rdparty.py',
+                            args=_metastore_raw16_args,
+                            actionable=_metastore_raw16_actionable),
+    '3rdparty':  dict(inp='libmtkcam_3rdparty.customer.so',
+                      out='{dev}-libmtkcam_3rdparty.customer.so',
+                      tool='patch_raw_3rdparty.py',
+                      args=_thirdparty_args, actionable=_thirdparty_actionable),
 }
 
 
