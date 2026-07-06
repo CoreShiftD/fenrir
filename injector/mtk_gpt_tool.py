@@ -54,6 +54,17 @@ GPT_HEADER_SIZE = 92
 ENTRY_SIZE = 128
 NUM_ENTRIES_DEFAULT = 128  # matches observed MTK GPTs (numEntries field can be lower; array is padded)
 
+# --- Defaults so you only need to pass --scatter (or nothing at all) ---
+# Override any of these per-invocation with --device / --scatter / --pgpt /
+# --sgpt / --disk-size / --storage.
+DEFAULT_DEVICE = "a75"
+DEFAULT_FIRMWARE_DIR = "bin/firmware/{device}"
+DEFAULT_SCATTER_NAME = "MT6789_Android_scatter.xml"
+DEFAULT_PGPT_NAME = "PGPT.img"
+DEFAULT_SGPT_NAME = "SGPT.img"
+DEFAULT_DISK_SIZE_BYTES = 511839305728  # confirmed real device size (~512GB nominal)
+DEFAULT_STORAGE = "ufs"
+
 # Type GUID used by MediaTek for every "normal" partition entry (raw 16 bytes,
 # already in on-disk mixed-endian order -- copy verbatim, do not re-encode).
 MTK_TYPE_GUID = bytes.fromhex("a2a0d0ebe5b9334487c068b6b72699c7")
@@ -568,13 +579,68 @@ def parse_size(s: str) -> int:
 
 
 def cmd_to_scatter(args):
+    args = resolve_defaults(args)
     sector_size = args.sector_size or (4096 if args.storage.lower() == "ufs" else 512)
     tree = to_scatter(args.scatter, args.storage, args.pgpt, sector_size)
     tree.write(args.out, encoding="UTF-8", xml_declaration=True)
     print(f"Wrote reconstructed scatter to {args.out}")
 
 
+def _find_fw_dir(device: str) -> str:
+    """Return the firmware directory for *device*, trying a case-insensitive
+    match against existing subdirectories of ``bin/firmware/`` if the exact
+    name doesn't exist."""
+    exact = Path(DEFAULT_FIRMWARE_DIR.format(device=device))
+    if exact.is_dir():
+        return str(exact)
+
+    base = exact.parent
+    if not base.is_dir():
+        return str(exact)
+
+    lower = device.lower()
+    for entry in base.iterdir():
+        if entry.is_dir() and entry.name.lower() == lower:
+            return str(entry)
+
+    return str(exact)
+
+
+def resolve_defaults(args):
+    """
+    Fill in any omitted --scatter/--pgpt/--sgpt/--disk-size/--storage from
+    the --device firmware directory + built-in defaults, so you only need
+    to pass what's actually different from your usual setup.
+
+    Device name matching is case-insensitive with respect to the filesystem:
+    if ``bin/firmware/<device>/`` doesn't exist, we scan for a subdirectory
+    whose name matches case-insensitively.
+    """
+    device = getattr(args, "device", None) or DEFAULT_DEVICE
+    fw_dir = _find_fw_dir(device)
+
+    if getattr(args, "storage", None) is None:
+        args.storage = DEFAULT_STORAGE
+    if getattr(args, "scatter", None) is None:
+        args.scatter = str(Path(fw_dir) / DEFAULT_SCATTER_NAME)
+    if getattr(args, "pgpt", None) is None and hasattr(args, "pgpt"):
+        args.pgpt = str(Path(fw_dir) / DEFAULT_PGPT_NAME)
+    if getattr(args, "sgpt", None) is None and hasattr(args, "sgpt"):
+        args.sgpt = str(Path(fw_dir) / DEFAULT_SGPT_NAME)
+    if getattr(args, "disk_size", None) is None and hasattr(args, "disk_size"):
+        args.disk_size = str(DEFAULT_DISK_SIZE_BYTES)
+
+    for attr in ("scatter", "pgpt", "sgpt"):
+        val = getattr(args, attr, None)
+        if val is not None and not Path(val).exists():
+            print(f"Warning: --{attr} default resolved to {val!r}, but that path "
+                  f"doesn't exist. Pass --{attr} explicitly or check --device.",
+                  file=sys.stderr)
+    return args
+
+
 def cmd_generate(args):
+    args = resolve_defaults(args)
     partitions = parse_scatter(args.scatter, args.storage)
     sector_size = args.sector_size or (4096 if args.storage.lower() == "ufs" else 512)
     disk_bytes = parse_size(args.disk_size)
@@ -588,16 +654,19 @@ def cmd_generate(args):
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "PGPT.img").write_bytes(pgpt)
-    (out_dir / "SGPT.img").write_bytes(sgpt)
+    pgpt_name = f"PGPT{args.output_suffix}.img"
+    sgpt_name = f"SGPT{args.output_suffix}.img"
+    (out_dir / pgpt_name).write_bytes(pgpt)
+    (out_dir / sgpt_name).write_bytes(sgpt)
 
     print(f"Sector size used: {sector_size} bytes")
     print(f"Disk size: {disk_bytes} bytes ({disk_bytes/1e9:.2f} GB)")
-    print(f"Wrote {len(resolved)} partitions to {out_dir}/PGPT.img and SGPT.img")
+    print(f"Wrote {len(resolved)} partitions to {out_dir}/{pgpt_name} and {sgpt_name}")
     print_layout(resolved, sector_size)
 
 
 def cmd_patch(args):
+    args = resolve_defaults(args)
     partitions = parse_scatter(args.scatter, args.storage)
     sector_size = args.sector_size or (4096 if args.storage.lower() == "ufs" else 512)
     disk_bytes = parse_size(args.disk_size)
@@ -628,15 +697,18 @@ def cmd_patch(args):
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "PGPT.img").write_bytes(pgpt)
-    (out_dir / "SGPT.img").write_bytes(sgpt)
-    print(f"Patched layout written to {out_dir}/PGPT.img and SGPT.img")
+    pgpt_name = f"PGPT{args.output_suffix}.img"
+    sgpt_name = f"SGPT{args.output_suffix}.img"
+    (out_dir / pgpt_name).write_bytes(pgpt)
+    (out_dir / sgpt_name).write_bytes(sgpt)
+    print(f"Patched layout written to {out_dir}/{pgpt_name} and {sgpt_name}")
     print(f"Preserved unique GUIDs for {len(name_to_existing_guid)} existing partitions")
     print_layout(resolved, sector_size)
 
 
 def cmd_inspect(args):
-    sector_size = args.sector_size or 512
+    args = resolve_defaults(args)
+    sector_size = args.sector_size or (4096 if args.storage.lower() == "ufs" else 512)
     existing, hdr = read_existing_entries(args.pgpt, sector_size)
     total_lba = struct.unpack_from("<Q", hdr, 32)[0] + 1
     print(f"Sector size: {sector_size}  Total LBAs: {total_lba}  "
@@ -661,9 +733,14 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     g = sub.add_parser("generate", help="Build fresh PGPT.img/SGPT.img from a scatter file")
-    g.add_argument("--scatter", required=True)
-    g.add_argument("--storage", choices=["emmc", "ufs"], required=True)
-    g.add_argument("--disk-size", required=True, help="e.g. 512GB, 476GiB, 511834865664")
+    g.add_argument("--device", default=None,
+                    help=f"Firmware folder name under bin/firmware/. Default: {DEFAULT_DEVICE!r}")
+    g.add_argument("--scatter", default=None,
+                    help="Default: bin/firmware/{device}/MT6789_Android_scatter.xml")
+    g.add_argument("--storage", choices=["emmc", "ufs"], default=None,
+                    help=f"Default: {DEFAULT_STORAGE!r}")
+    g.add_argument("--disk-size", default=None,
+                    help=f"e.g. 512GB, 476GiB, 511834865664. Default: {DEFAULT_DISK_SIZE_BYTES}")
     g.add_argument("--sector-size", type=int, default=None)
     g.add_argument("--num-entries", type=int, default=None,
                     help="GPT entry slot count. Default: exact partition count "
@@ -673,32 +750,43 @@ def main():
                     help="Override firstUsableLBA header field. Some vendor tools "
                          "hardcode 34 (the classic 512-byte-sector GPT constant) "
                          "even on 4096-byte-sector disks; set this to match exactly.")
+    g.add_argument("--output-suffix", default="",
+                    help="Suffix before .img, e.g. _gen → PGPT_gen.img")
     g.add_argument("--out-dir", default="./out")
     g.set_defaults(func=cmd_generate)
 
     p = sub.add_parser("patch", help="Update PGPT.img/SGPT.img layout from a scatter file, "
                                       "preserving existing unique GUIDs where possible")
-    p.add_argument("--scatter", required=True)
-    p.add_argument("--storage", choices=["emmc", "ufs"], required=True)
-    p.add_argument("--pgpt", required=True)
-    p.add_argument("--sgpt", required=False)
-    p.add_argument("--disk-size", required=True)
+    p.add_argument("--device", default=None)
+    p.add_argument("--scatter", default=None,
+                    help="Default: bin/firmware/{device}/MT6789_Android_scatter.xml")
+    p.add_argument("--storage", choices=["emmc", "ufs"], default=None)
+    p.add_argument("--pgpt", default=None, help="Default: bin/firmware/{device}/PGPT.img")
+    p.add_argument("--sgpt", default=None, help="Default: bin/firmware/{device}/SGPT.img")
+    p.add_argument("--disk-size", default=None)
     p.add_argument("--sector-size", type=int, default=None)
     p.add_argument("--num-entries", type=int, default=None)
     p.add_argument("--first-usable-lba", type=int, default=None)
+    p.add_argument("--output-suffix", default="",
+                    help="Suffix before .img, e.g. _patch → PGPT_patch.img")
     p.add_argument("--out-dir", default="./out")
     p.set_defaults(func=cmd_patch)
 
     i = sub.add_parser("inspect", help="Print the layout found in an existing PGPT.img")
-    i.add_argument("--pgpt", required=True)
+    i.add_argument("--device", default=None)
+    i.add_argument("--pgpt", default=None, help="Default: bin/firmware/{device}/PGPT.img")
+    i.add_argument("--storage", choices=["emmc", "ufs"], default=None)
     i.add_argument("--sector-size", type=int, default=None)
     i.set_defaults(func=cmd_inspect)
 
     t = sub.add_parser("to-scatter", help="Reconstruct a scatter XML from a real PGPT.img, "
                                            "using another scatter file as a field template")
-    t.add_argument("--scatter", required=True, help="Template scatter XML (for field conventions)")
-    t.add_argument("--storage", choices=["emmc", "ufs"], required=True)
-    t.add_argument("--pgpt", required=True, help="Real device PGPT.img to read the layout from")
+    t.add_argument("--device", default=None)
+    t.add_argument("--scatter", default=None,
+                    help="Template scatter XML. Default: bin/firmware/{device}/MT6789_Android_scatter.xml")
+    t.add_argument("--storage", choices=["emmc", "ufs"], default=None)
+    t.add_argument("--pgpt", default=None,
+                    help="Real device PGPT.img to read the layout from. Default: bin/firmware/{device}/PGPT.img")
     t.add_argument("--sector-size", type=int, default=None)
     t.add_argument("--out", default="./reconstructed_scatter.xml")
     t.set_defaults(func=cmd_to_scatter)

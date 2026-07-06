@@ -162,6 +162,34 @@ def main():
             return rc
         ran.append((pname, out))
 
+    # --- GPT partition table images ---
+    gpt_cfg = fw.get('gpt')
+    if gpt_cfg is not None:
+        inp = gpt_cfg.get('scatter') or os.path.join(args.in_dir, 'MT6789_Android_scatter.xml')
+        if not os.path.exists(inp):
+            skipped.append(('gpt', f"scatter not found at {inp}"))
+        else:
+            out = args.out_dir
+            cmd = [py, os.path.join(HERE, 'mtk_gpt_tool.py'), 'generate',
+                   '--device', dev.name.lower(), '--out-dir', out,
+                   '--output-suffix', '_gen']
+            if gpt_cfg.get('storage'):
+                cmd += ['--storage', gpt_cfg['storage']]
+            if gpt_cfg.get('disk_size') is not None:
+                cmd += ['--disk-size', str(gpt_cfg['disk_size'])]
+            if gpt_cfg.get('sector_size'):
+                cmd += ['--sector-size', str(gpt_cfg['sector_size'])]
+            print(f"\n── gpt ──")
+            print("  $ " + ' '.join(cmd))
+            if args.dry_run:
+                print("  (dry-run, skipped)")
+            else:
+                rc = subprocess.call(cmd)
+                if rc != 0:
+                    print(f"\nFAIL: gpt exited {rc} — aborting.")
+                    return rc
+            ran.append(('gpt', os.path.join(out, 'PGPT_gen.img') + ', SGPT_gen.img'))
+
     print("\n" + "=" * 68)
     if ran:
         print(" Produced (EXPERIMENTAL, verify before flashing):")

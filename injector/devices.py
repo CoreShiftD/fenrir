@@ -2,7 +2,7 @@ from device import Device
 from stage import PayloadStage, PatchStage
 from patch_utils import MatchMode
 
-def firmware_config(mcupm=None, pi_img=None, gpufreq=None):
+def firmware_config(mcupm=None, pi_img=None, gpufreq=None, gpt=None):
     cfg = {
         'mcupm': {
             'big': None,                   # BIG (A76) cluster max MHz, stock 2200.
@@ -32,6 +32,15 @@ def firmware_config(mcupm=None, pi_img=None, gpufreq=None):
         cfg['pi_img'].update(pi_img)
     if gpufreq:
         cfg['gpufreq'].update(gpufreq)
+    if gpt is not None:
+        cfg['gpt'] = {
+            'scatter': None,
+            'storage': None,
+            'disk_size': None,
+            'sector_size': None,
+        }
+        if gpt:
+            cfg['gpt'].update(gpt)
     return cfg
 
 
@@ -811,6 +820,11 @@ DEVICES = [
                 'floor_volt': 583,
                 'offset': None,
                 'skip': [],
+            },
+            'gpt': {
+                'storage': 'ufs',
+                'disk_size': 511839305728,
+                'sector_size': 4096,
             },
         },
     ),
