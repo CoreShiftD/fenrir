@@ -841,6 +841,7 @@ DEVICES = [
                 'storage': 'ufs',
                 'disk_size': 511839305728,
                 'sector_size': 4096,
+                'disable_geniezone': True,
             },
         },
     ),

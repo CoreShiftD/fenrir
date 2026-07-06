@@ -706,6 +706,92 @@ def cmd_patch(args):
     print_layout(resolved, sector_size)
 
 
+def cmd_disable_gz(args):
+    """
+    Disable GenieZone by patching gz_a/gz_b GPT entries so their LBAs point
+    beyond the device capacity. The partition names stay in the table (passes
+    preloader existence checks) but any storage read will fail, triggering the
+    internal NoGZ flag.
+    """
+    args = resolve_defaults(args)
+    sector_size = args.sector_size or (4096 if args.storage.lower() == "ufs" else 512)
+    pgpt_data = Path(args.pgpt).read_bytes()
+
+    if pgpt_data[sector_size:sector_size + 8] != GPT_SIGNATURE:
+        raise ValueError("No 'EFI PART' signature found; try adjusting --sector-size")
+    hdr = pgpt_data[sector_size:sector_size + GPT_HEADER_SIZE]
+
+    total_lba = struct.unpack_from("<Q", hdr, 32)[0] + 1
+    num_entries = struct.unpack_from("<I", hdr, 80)[0]
+    entry_size = struct.unpack_from("<I", hdr, 84)[0]
+    entries_lba = struct.unpack_from("<Q", hdr, 72)[0]
+    entries_off = entries_lba * sector_size
+    data_len = entries_off + num_entries * entry_size
+
+    if data_len > len(pgpt_data):
+        raise ValueError("PGPT image is truncated or sector size is wrong")
+
+    gz_names = {"gz_a", "gz_b", "gz1", "gz2"}
+    gz_found = []
+    modified_any = False
+    entries = bytearray(pgpt_data[entries_off:data_len])
+
+    for i in range(num_entries):
+        off = i * entry_size
+        e = entries[off:off + entry_size]
+        if len(e) < entry_size or e[0:16] == b"\x00" * 16:
+            continue
+        name = e[56:56 + 72].decode("utf-16-le").rstrip("\x00")
+        if name not in gz_names:
+            continue
+        first_lba = struct.unpack_from("<Q", e, 32)[0]
+        last_lba = struct.unpack_from("<Q", e, 40)[0]
+        gz_found.append((name, first_lba, last_lba))
+
+        if first_lba >= total_lba or last_lba >= total_lba:
+            print(f"  {name}: already disabled (LBA {first_lba:#x} >= {total_lba:#x})")
+            continue
+
+        new_first = total_lba
+        new_last = total_lba + (last_lba - first_lba)
+        struct.pack_into("<Q", entries, off + 32, new_first)
+        struct.pack_into("<Q", entries, off + 40, new_last)
+        print(f"  {name}: {first_lba:#x}..{last_lba:#x} -> {new_first:#x}..{new_last:#x}")
+        modified_any = True
+
+    if not gz_found:
+        print("No GenieZone partitions (gz_a, gz_b, gz1, gz2) found in GPT")
+        sys.exit(1)
+
+    if not modified_any:
+        print("\nAll gz partitions already have LBAs beyond disk capacity. Nothing to do.")
+        sys.exit(0)
+
+    entries_bytes = bytes(entries)
+
+    my_lba = struct.unpack_from("<Q", hdr, 24)[0]
+    alt_lba = struct.unpack_from("<Q", hdr, 32)[0]
+    first_usable = struct.unpack_from("<Q", hdr, 40)[0]
+    last_usable = struct.unpack_from("<Q", hdr, 48)[0]
+    disk_guid = hdr[56:72]
+
+    back_reserved = alt_lba - last_usable
+
+    pgpt_bytes, sgpt_bytes = assemble_images(
+        entries_bytes, total_lba * sector_size, sector_size,
+        num_entries=num_entries, disk_guid=disk_guid,
+        first_usable_override=first_usable,
+        sgpt_region_lba=back_reserved,
+        image_block_bytes=0x8000)
+
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "PGPT_gz_disabled.img").write_bytes(pgpt_bytes)
+    (out_dir / "SGPT_gz_disabled.img").write_bytes(sgpt_bytes)
+    print(f"\nWrote {out_dir}/PGPT_gz_disabled.img and SGPT_gz_disabled.img")
+    print(f"Flash both images to disable GenieZone on next boot.")
+
+
 def cmd_inspect(args):
     args = resolve_defaults(args)
     sector_size = args.sector_size or (4096 if args.storage.lower() == "ufs" else 512)
@@ -778,6 +864,14 @@ def main():
     i.add_argument("--storage", choices=["emmc", "ufs"], default=None)
     i.add_argument("--sector-size", type=int, default=None)
     i.set_defaults(func=cmd_inspect)
+
+    d = sub.add_parser("disable-gz", help="Disable GenieZone: point gz_a/gz_b LBAs beyond disk capacity")
+    d.add_argument("--device", default=None)
+    d.add_argument("--pgpt", default=None, help="Default: bin/firmware/{device}/PGPT.img")
+    d.add_argument("--storage", choices=["emmc", "ufs"], default=None)
+    d.add_argument("--sector-size", type=int, default=None)
+    d.add_argument("--out-dir", default="./out")
+    d.set_defaults(func=cmd_disable_gz)
 
     t = sub.add_parser("to-scatter", help="Reconstruct a scatter XML from a real PGPT.img, "
                                            "using another scatter file as a field template")

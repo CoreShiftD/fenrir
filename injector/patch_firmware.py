@@ -245,6 +245,32 @@ def main():
                     return rc
             ran.append(('gpt', os.path.join(out, 'PGPT_gen.img') + ', SGPT_gen.img'))
 
+        # --- GenieZone disable (patching existing PGPT/SGPT) ---
+        if gpt_cfg.get('disable_geniezone'):
+            pgpt = gpt_cfg.get('pgpt') or os.path.join(args.in_dir, 'PGPT.img')
+            if not os.path.exists(pgpt):
+                skipped.append(('gpt:disable-gz', f"PGPT not found at {pgpt}"))
+            else:
+                cmd_disable = [py, os.path.join(HERE, 'mtk_gpt_tool.py'), 'disable-gz',
+                               '--device', dev.name.lower(), '--pgpt', pgpt,
+                               '--out-dir', out]
+                if gpt_cfg.get('storage'):
+                    cmd_disable += ['--storage', gpt_cfg['storage']]
+                if gpt_cfg.get('sector_size'):
+                    cmd_disable += ['--sector-size', str(gpt_cfg['sector_size'])]
+                print(f"\n── gpt:disable-gz ──")
+                print("  $ " + ' '.join(cmd_disable))
+                if args.dry_run:
+                    print("  (dry-run, skipped)")
+                else:
+                    rc = subprocess.call(cmd_disable)
+                    if rc != 0:
+                        print(f"\nFAIL: disable-gz exited {rc} — aborting.")
+                        return rc
+                ran.append(('gpt:disable-gz',
+                            os.path.join(out, 'PGPT_gz_disabled.img') +
+                            ', SGPT_gz_disabled.img'))
+
     print("\n" + "=" * 68)
     if ran:
         print(" Produced (EXPERIMENTAL, verify before flashing):")
