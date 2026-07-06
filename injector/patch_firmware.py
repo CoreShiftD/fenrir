@@ -125,6 +125,14 @@ def _metastore_raw16_actionable(cfg):
     return bool(cfg)
 
 
+def _preloader_gz_args(cfg):
+    return []
+
+
+def _preloader_gz_actionable(cfg):
+    return bool(cfg)
+
+
 PARTS = {
     'mcupm':    dict(inp='mcupm.img',  out='{dev}-mcupm.img',
                      tool='mcupm_devices.py',
@@ -148,6 +156,11 @@ PARTS = {
                       out='{dev}-libmtkcam_3rdparty.customer.so',
                       tool='patch_raw_3rdparty.py',
                       args=_thirdparty_args, actionable=_thirdparty_actionable),
+    'preloader_gz': dict(inp='preloader_k6789v1_64.bin',
+                         out='{dev}-preloader_nogz.bin',
+                         tool='patch_preloader_gz.py',
+                         args=_preloader_gz_args,
+                         actionable=_preloader_gz_actionable),
 }
 
 

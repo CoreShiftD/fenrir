@@ -837,6 +837,9 @@ DEVICES = [
             # Patch libmtkcam_3rdparty.customer.so to add raw/DNG scenario
             # feature bits (bit 35 + 36) at the vendor metadata tag check.
             '3rdparty': True,
+            # Patch preloader to skip GenieZone (GZ) init — one-byte
+            # binary edit; avoids the GPT-based disable-gz approach.
+            'preloader_gz': True,
             'gpt': {
                 'storage': 'ufs',
                 'disk_size': 511839305728,
