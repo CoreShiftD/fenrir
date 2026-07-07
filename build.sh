@@ -8,19 +8,18 @@ BLUE='\033[0;34m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-# Optional opt-in: --firmware runs the EXPERIMENTAL multi-partition firmware OC
-# (mcupm/pi_img/gpufreq) after the bootloader inject. Strip it before positional args.
-DO_FIRMWARE=0
+# Forward --firmware to patch_firmware.py; strip it before positional args.
+FW_FLAGS=()
 POSARGS=()
 for arg in "$@"; do
     case "$arg" in
-        --firmware) DO_FIRMWARE=1 ;;
+        --firmware) FW_FLAGS+=("--firmware") ;;
         *) POSARGS+=("$arg") ;;
     esac
 done
 set -- "${POSARGS[@]}"
 
-DEVICE="${1:-pacman}"
+DEVICE="${1:-A75}"
 DEVICE_LOWER=$(echo "$DEVICE" | tr '[:upper:]' '[:lower:]')
 
 if [ -n "$2" ]; then
@@ -116,10 +115,6 @@ else
     exit 1
 fi
 
-if [ "$DO_FIRMWARE" -eq 1 ]; then
-    echo
-    echo -e "${YELLOW}Running EXPERIMENTAL firmware-partition OC (--firmware)...${NC}"
-    echo -e "${YELLOW}  UNVERIFIED per silicon — flash & verify on-device.${NC}"
-    "$FW_PY" injector/patch_firmware.py "$DEVICE" || {
-        echo -e "${RED}Firmware OC step failed${NC}"; exit 1; }
-fi
+echo -e "${YELLOW}Patching camera/firmware libraries...${NC}"
+"$FW_PY" injector/patch_firmware.py "$DEVICE" "${FW_FLAGS[@]}" || {
+    echo -e "${RED}Patch step failed${NC}"; exit 1; }

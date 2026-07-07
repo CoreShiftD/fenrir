@@ -4,9 +4,9 @@ patch_firmware.py — EXPERIMENTAL multi-partition firmware OC orchestrator.
 
 Reads the per-device `firmware={...}` block from devices.py and drives the
 individual partition patchers (each has DIFFERENT flags), re-signing every
-modified image. Opt-in from build.sh via `--firmware`.
+modified image.
 
-    build.sh <device> [bootloader] --firmware
+    build.sh <device> [bootloader]
         └─> patch_firmware.py <device>
               ├─ mcupm_devices.py        mcupm.img         <dev>-mcupm.img
               ├─ pi_img_devices.py       pi_img.bin        <dev>-pi_img.bin
@@ -161,11 +161,11 @@ PARTS = {
                       out='{dev}-libmtkcam_3rdparty.customer.so',
                       tool='patch_raw_3rdparty.py',
                       args=_thirdparty_args, actionable=_thirdparty_actionable),
-    'preloader_gz': dict(inp='preloader_k6789v1_64.bin',
-                         out='{dev}-preloader_nogz.bin',
-                         tool='patch_preloader_gz.py',
-                         args=_preloader_gz_args,
-                         actionable=_preloader_gz_actionable),
+    'preloader': dict(inp='preloader_k6789v1_64.bin',
+                      out='{dev}-preloader_patched.bin',
+                      tool='patch_preloader.py',
+                      args=_preloader_args,
+                      actionable=_preloader_actionable),
 }
 
 
@@ -186,6 +186,11 @@ def main():
     ap.add_argument('--out-dir', default=None,
                     help='Output directory (default: same as --in-dir)')
     ap.add_argument('--dry-run', '-n', action='store_true', help='Simulate; write nothing')
+    ap.add_argument('--firmware', action='store_true', help='Run all parts from devices.py config')
+    for pname in PARTS:
+        flag = '--' + pname.replace('_', '-')
+        ap.add_argument(flag, action='store_true', help=f'Enable {pname} patching')
+    ap.add_argument('--gpt', action='store_true', help='Enable GPT partition table generation')
     args = ap.parse_args()
 
     dev = find_device(args.device)
@@ -206,6 +211,22 @@ def main():
               f"(add one in injector/devices.py).")
         return 0
 
+    enabled = set()
+    if args.firmware:
+        for pname in PARTS:
+            enabled.add(pname)
+        enabled.add('gpt')
+    else:
+        for pname in PARTS:
+            if getattr(args, pname, False):
+                enabled.add(pname)
+        if args.gpt:
+            enabled.add('gpt')
+
+    if not enabled:
+        print("No parts selected. Use --firmware or --<part> flags (e.g. --metastore --preloader).")
+        return 0
+
     print("=" * 68)
     print(f" EXPERIMENTAL firmware OC for {dev.name} ({dev.codename})")
     print(" UNVERIFIED per silicon — flash & verify on-device. Nothing flashed here.")
@@ -215,14 +236,20 @@ def main():
     py = venv_python()
     ran, skipped = [], []
     for pname, spec in PARTS.items():
+        if pname not in enabled:
+            skipped.append((pname, 'not selected'))
+            continue
         cfg = fw.get(pname)
         if not cfg or not spec['actionable'](cfg):
             skipped.append((pname, 'no actionable flags'))
             continue
-        inp = os.path.join(args.in_dir, spec['inp'])
+        inp_raw = spec['inp'].format(dev=dev.name.lower())
+        inp = os.path.join(args.out_dir, inp_raw)
         if not os.path.exists(inp):
-            skipped.append((pname, f"input '{spec['inp']}' not found in {args.in_dir}"))
-            continue
+            inp = os.path.join(args.in_dir, inp_raw)
+            if not os.path.exists(inp):
+                skipped.append((pname, f"input '{inp_raw}' not found"))
+                continue
         out = os.path.join(args.out_dir, spec['out'].format(dev=dev.name.lower()))
         cmd = [py, os.path.join(HERE, spec['tool']), inp, out] + spec['args'](cfg)
         if args.dry_run:
@@ -237,7 +264,9 @@ def main():
 
     # --- GPT partition table images ---
     gpt_cfg = fw.get('gpt')
-    if gpt_cfg is not None:
+    if 'gpt' not in enabled:
+        skipped.append(('gpt', 'not selected (use --gpt)'))
+    elif gpt_cfg is not None:
         inp = gpt_cfg.get('scatter') or os.path.join(args.in_dir, 'MT6789_Android_scatter.xml')
         if not os.path.exists(inp):
             skipped.append(('gpt', f"scatter not found at {inp}"))

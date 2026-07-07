@@ -8,3 +8,4 @@ payload/build/
 *.bin
 settings.json
 bin/*.raw
+bin/*.so
