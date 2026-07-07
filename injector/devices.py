@@ -837,11 +837,6 @@ DEVICES = [
             # Patch libmtkcam_3rdparty.customer.so to add raw/DNG scenario
             # feature bits (bit 35 + 36) at the vendor metadata tag check.
             '3rdparty': True,
-            # Preloader patches — opt in to each independently via sub-keys.
-            'preloader': {
-                'gz': True,        # Skip GenieZone init (BEQ -> B in gz_release_all)
-                'usb_dl': True,    # Force USB DL mode always-on (CBZ -> NOP in usb_dl_init)
-            },
             'gpt': {
                 'storage': 'ufs',
                 'disk_size': 511839305728,

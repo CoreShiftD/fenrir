@@ -125,19 +125,6 @@ def _metastore_raw16_actionable(cfg):
     return bool(cfg)
 
 
-def _preloader_args(cfg):
-    a = []
-    if cfg.get('gz'):
-        a += ['--gz']
-    if cfg.get('usb_dl'):
-        a += ['--usb-dl']
-    return a
-
-
-def _preloader_actionable(cfg):
-    return bool(cfg.get('gz') or cfg.get('usb_dl'))
-
-
 PARTS = {
     'mcupm':    dict(inp='mcupm.img',  out='{dev}-mcupm.img',
                      tool='mcupm_devices.py',
@@ -161,11 +148,6 @@ PARTS = {
                       out='{dev}-libmtkcam_3rdparty.customer.so',
                       tool='patch_raw_3rdparty.py',
                       args=_thirdparty_args, actionable=_thirdparty_actionable),
-    'preloader': dict(inp='preloader_k6789v1_64.bin',
-                      out='{dev}-preloader_patched.bin',
-                      tool='patch_preloader.py',
-                      args=_preloader_args,
-                      actionable=_preloader_actionable),
 }
 
 
