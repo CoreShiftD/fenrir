@@ -14,6 +14,15 @@ class Device:
         self.cert_bypass: bool = cert_bypass
         self.device_opts: Dict[str, Any] = kwargs
 
+    @property
+    def da_config(self) -> dict:
+        fw = self.device_opts.get('firmware', {})
+        return fw.get('da', {'enabled': False, 'da1_patch': True, 'da2_patch': True})
+
+    @property
+    def firmware_dir(self) -> str:
+        return f"bin/firmware/{self.name.lower()}/download_agent"
+
     def execute(self, args: Any) -> int:
         injector: BootloaderInjector = BootloaderInjector(
             args.image,

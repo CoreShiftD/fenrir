@@ -9,6 +9,7 @@ The DA2 in DA_BR.bin is ARM32 code. This script:
 3. Patches OEM-specific security (SLA, Vivo, OPlus)
 """
 
+import os
 import struct
 import sys
 from typing import Optional, Tuple
@@ -466,24 +467,158 @@ def patch_da2(da2: bytes, base: int = 0x40000000) -> bytearray:
     return da2p
 
 
+def patch_da1(da1: bytes, base: int = 0x200000) -> bytearray:
+    da1p = bytearray(da1)
+    at = ArmTools(da1, base)
+    patched = False
+
+    print("\n" + "=" * 60)
+    print("DA1 Patches (entry fix + hash bypass)")
+    print("=" * 60)
+
+    # ============================================================
+    # 0. Entry point: B #-4 -> B #0x14
+    #    BROM jumps to 0x200000, but the first instruction is an
+    #    infinite loop (parasite check). The real init code is at +0x14.
+    # ============================================================
+    print("\n[0] Entry point parasite fix...")
+    entry_off = 0
+    orig_4b = int.from_bytes(da1[entry_off:entry_off+4], 'little')
+    entry_valid = False
+
+    # Two possible stock values:
+    #   0xEAFFFFFE  B #-4      (self-loop -- parasitic dead-man switch)
+    #   0xEAFFFFFF  B 0x200004 (enters helper, then BX LR -> garbage)
+    # Both need to become: B #0x14 -> jump directly to real init at 0x200014
+    if orig_4b in (0xEAFFFFFE, 0xEAFFFFFF):
+        # Decode original target for display
+        imm24 = orig_4b & 0xFFFFFF
+        if imm24 & 0x800000:
+            imm24 -= 0x1000000
+        orig_target = 0x200008 + imm24 * 4
+        da1p[entry_off:entry_off+4] = b"\x03\x00\x00\xEA"  # B #0x14
+        print(f"  ✓ Entry 0x{orig_4b:08x} (B {hex(orig_target)}) -> B #0x14")
+        patched = True
+    else:
+        print(f"  ⚠ Entry is 0x{orig_4b:08x} (unexpected pattern), patching anyway...")
+        da1p[entry_off:entry_off+4] = b"\x03\x00\x00\xEA"  # B #0x14
+        print(f"  ✓ Forced entry to B #0x14")
+        patched = True
+
+    # ============================================================
+    # 1. Force hash byte-comparison skip
+    #    At VA 0x2012fc: CMP R0, #0 (0xE3500000) -> CMP R0, R0 (0xE1500000)
+    #    This makes BEQ at 0x201300 always taken, skipping the
+    #    byte-by-byte comparison against the stored hash at 0x226db8.
+    # ============================================================
+    cmp_off = 0x2012fc - base
+    if cmp_off < len(da1):
+        orig = int.from_bytes(da1[cmp_off:cmp_off+4], 'little')
+        if orig == 0xE3500000:  # CMP R0, #0
+            da1p[cmp_off:cmp_off+4] = b"\x00\x00\x50\xE1"  # CMP R0, R0
+            print(f"  ✓ Patched hash skip check at da1+0x{cmp_off:x} (VA 0x{base+cmp_off:x})")
+            patched = True
+        else:
+            print(f"  ✗ Expected CMP R0,#0 at da1+0x{cmp_off:x}, got 0x{orig:08x}")
+
+    # ============================================================
+    # 2. NOP the BNE in the byte-by-byte comparison loop
+    #    At VA 0x20131c: BNE -> NOP
+    #    Backup: makes byte comparison never trigger mismatch
+    # ============================================================
+    bne_off = 0x20131c - base
+    if bne_off < len(da1):
+        orig = int.from_bytes(da1[bne_off:bne_off+4], 'little')
+        if (orig & 0xFF000000) == 0x1A000000:  # BNE
+            da1p[bne_off:bne_off+4] = b"\x00\x00\x00\x1A"  # NOP (conditional NOP for ARM32)
+            print(f"  ✓ Patched BNE->NOP at da1+0x{bne_off:x} (VA 0x{base+bne_off:x})")
+            patched = True
+        else:
+            print(f"  ✗ Expected BNE at da1+0x{bne_off:x}, got 0x{orig:08x}")
+
+    # ============================================================
+    # 3. Also force CMP in the byte loop to always match
+    #    At VA 0x201318: CMP R3, R2 (0xE1530002) -> CMP R3, R3 (0xE1530003)
+    # ============================================================
+    cmp2_off = 0x201318 - base
+    if cmp2_off < len(da1):
+        orig = int.from_bytes(da1[cmp2_off:cmp2_off+4], 'little')
+        if orig == 0xE1530002:  # CMP R3, R2
+            da1p[cmp2_off:cmp2_off+4] = b"\x03\x00\x53\xE1"  # CMP R3, R3
+            print(f"  ✓ Patched byte CMP at da1+0x{cmp2_off:x} (VA 0x{base+cmp2_off:x})")
+            patched = True
+        else:
+            print(f"  ✗ Expected CMP R3,R2 at da1+0x{cmp2_off:x}, got 0x{orig:08x}")
+
+    if not patched:
+        print("  ❌ No DA1 patches were applied!")
+
+    return da1p
+
+
 def main():
-    bin_path = "/opt/work/fenrir/bin/firmware/a75/download_agent/DA_BR.bin"
-    out_path = "/opt/work/fenrir/DA_BR_patched.bin"
+    import argparse
+    sys.path.insert(0, os.path.dirname(__file__))
+    from devices import DA_DEVICES
+
+    parser = argparse.ArgumentParser(description="Patch DA_BR.bin to disable security checks")
+    parser.add_argument('--device', default='a75', help='Device name (default: a75)')
+    parser.add_argument('--input', help='Input DA_BR.bin path (overrides device lookup)')
+    parser.add_argument('--output', help='Output path (default: same dir as input, suffixed _patched)')
+    parser.add_argument('--no-da1', action='store_true', help='Skip DA1 patching')
+    parser.add_argument('--no-da2', action='store_true', help='Skip DA2 patching')
+    args = parser.parse_args()
+
+    device_name = args.device.lower()
+    da_dev = DA_DEVICES.get(device_name)
+    if da_dev is None:
+        known = list(DA_DEVICES.keys())
+        print(f"Device '{device_name}' not found in DA_DEVICES. Known: {known}")
+        return 1
+
+    if args.input:
+        bin_path = args.input
+    else:
+        fw_dir = f"bin/firmware/{device_name}/download_agent"
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        bin_path = os.path.join(repo_root, fw_dir, "DA_BR.bin")
+
+    out_path = args.output or bin_path.replace(".bin", "_patched.bin")
+    print(f"Input:  {bin_path}")
+    print(f"Output: {out_path}")
 
     with open(bin_path, 'rb') as f:
         stock = f.read()
 
+    da1_off = 0xbc
+    da1_len = 0x62ee8
     da2_off = 0x62fa4
     da2_len = 0x51bf8
+
+    da1 = stock[da1_off:da1_off+da1_len]
     da2 = stock[da2_off:da2_off+da2_len]
 
     print(f"Stock DA_BR.bin: {len(stock)} bytes")
+    print(f"DA1 at offset 0x{da1_off:x}, size 0x{da1_len:x} ({da1_len} bytes)")
     print(f"DA2 at offset 0x{da2_off:x}, size 0x{da2_len:x} ({da2_len} bytes)")
 
-    da2p = patch_da2(da2)
+    # Patch DA2 security policies
+    da2p = da2
+    if args.no_da2 or not da_dev.get('da2_patch', True):
+        print("\n[SKIP] DA2 patching disabled")
+    else:
+        da2p = patch_da2(da2)
+
+    # Patch DA1 hash verification
+    da1p = da1
+    if args.no_da1 or not da_dev.get('da1_patch', True):
+        print("\n[SKIP] DA1 patching disabled")
+    else:
+        da1p = patch_da1(da1)
 
     # Rebuild full binary
     patched = bytearray(stock)
+    patched[da1_off:da1_off+da1_len] = da1p
     patched[da2_off:da2_off+da2_len] = da2p
     with open(out_path, 'wb') as f:
         f.write(patched)

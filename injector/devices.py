@@ -2,7 +2,7 @@ from device import Device
 from stage import PayloadStage, PatchStage
 from patch_utils import MatchMode
 
-def firmware_config(mcupm=None, pi_img=None, gpufreq=None, gpt=None):
+def firmware_config(mcupm=None, pi_img=None, gpufreq=None, gpt=None, da=None):
     cfg = {
         'mcupm': {
             'big': None,                   # BIG (A76) cluster max MHz, stock 2200.
@@ -25,6 +25,11 @@ def firmware_config(mcupm=None, pi_img=None, gpufreq=None, gpt=None):
             'offset': None,          # OPP table offset override, e.g. 0xbd10.
             'skip': [],              # patch_gpufreq.py patch names to skip.
         },
+        'da': {
+            'enabled': False,
+            'da1_patch': True,
+            'da2_patch': True,
+        },
     }
     if mcupm:
         cfg['mcupm'].update(mcupm)
@@ -41,6 +46,8 @@ def firmware_config(mcupm=None, pi_img=None, gpufreq=None, gpt=None):
         }
         if gpt:
             cfg['gpt'].update(gpt)
+    if da is not None:
+        cfg['da'].update(da)
     return cfg
 
 
@@ -843,6 +850,24 @@ DEVICES = [
                 'sector_size': 4096,
                 'disable_geniezone': True,
             },
+            'da': {
+                'enabled': True,
+                'da1_patch': True,
+                'da2_patch': True,
+            },
         },
     ),
 ]
+
+# DA patcher device config: name -> dict with firmware subdir and patch flags.
+# patch_da.py imports this to resolve device-specific DA paths.
+DA_DEVICES = {}
+for d in DEVICES:
+    cfg = d.da_config
+    if cfg.get('enabled'):
+        DA_DEVICES[d.name.lower()] = {
+            'dir': d.name.lower(),
+            'da1_patch': cfg.get('da1_patch', True),
+            'da2_patch': cfg.get('da2_patch', True),
+        }
+
