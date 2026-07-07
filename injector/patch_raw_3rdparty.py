@@ -205,186 +205,281 @@ def make_3rdparty_trampoline(cave_va, return_va, plt_entry_for, plt_count,
 # ─── Mode: metastore-raw16 ───────────────────────────────────────────
 
 def make_metastore_raw16_trampoline(tramp_va, push_back_va, tag_va, update_va,
-                                    raw16_res):
+                                    entry_for_va, ientry_dtor_va,
+                                    raw16_res, stream_cfg_tag=0xd000a):
     """
-    Build a 164-byte AArch64 trampoline that injects a RAW16 entry into the
-    recommended stream configuration IEntry before IMetadata::update().
+    Build an AArch64 trampoline that injects RAW16 entries into BOTH the
+    recommended and standard MTK_SCALER_AVAILABLE_STREAM_CONFIGURATIONS.
 
     On entry (from original call site at 0x76174):
       x0 = IMetadata*  (saved to x20)
-      x2 = IEntry*     (saved to x19)
+      x2 = IEntry*     (saved to x19, points to recommended IEntry)
 
-    The trampoline saves registers, pushes 4 int32 values (format=0x20,
-    width, height, input=0) via IEntry::push_back, calls IEntry::tag() to
-    get the tag, then calls IMetadata::update().
+    The trampoline:
+      1. Pushes 4 int32 values (format=0x20, w, h, dir=0) to the
+         recommended IEntry and calls update().
+      2. Calls IMetadata::entryFor(stream_cfg_tag, 0) to get a copy of
+         the standard stream config IEntry, pushes the same RAW16 tuple,
+         calls update(), and destructs the copy.
     """
-    width, height = raw16_res
+    SC = stream_cfg_tag
+    w, h = raw16_res
     code = bytearray()
     pc = tramp_va
 
     def emit(b):
         nonlocal code, pc
-        code += b
-        pc += len(b)
+        code += b; pc += len(b)
 
     def emit_u32(v):
         nonlocal code, pc
-        code += struct.pack('<I', v)
-        pc += 4
+        code += struct.pack('<I', v); pc += 4
 
-    def emit_bl(target):
+    def emit_bl(tgt):
         nonlocal code, pc
-        code += bl_encode(pc, target)
-        pc += 4
+        code += bl_encode(pc, tgt); pc += 4
 
-    # Verified AArch64 encodings
-    E = {}
-    E['sub_sp_0x20']   = struct.pack('<I', 0xD10083FF)  # sub sp, sp, #0x20
-    E['stp_29_30_sp']  = struct.pack('<I', 0xA9007BFD)  # stp x29, x30, [sp]
-    E['add_x29_sp_0']  = struct.pack('<I', 0x910003FD)  # add x29, sp, #0
-    E['stp_19_20_sp_10'] = struct.pack('<I', 0xA90153F3) # stp x19, x20, [sp, #0x10]
-    E['mov_x19_x2']    = struct.pack('<I', 0xAA0203F3)  # mov x19, x2
-    E['mov_x20_x0']    = struct.pack('<I', 0xAA0003F4)  # mov x20, x0
-    E['sub_sp_0x10']   = struct.pack('<I', 0xD10043FF)  # sub sp, sp, #0x10
-    E['str_w0_sp']     = struct.pack('<I', 0xB9001FE0)  # str w0, [sp]
-    E['str_wzr_sp']    = struct.pack('<I', 0xB9001FFF)  # str wzr, [sp]
-    E['mov_x0_x19']    = struct.pack('<I', 0xAA1303E0)  # mov x0, x19
-    E['add_x1_sp_0']   = struct.pack('<I', 0x910003E1)  # add x1, sp, #0
-    E['mov_x2_xzr']    = struct.pack('<I', 0xAA1F03E2)  # mov x2, xzr
-    E['add_sp_0x10']   = struct.pack('<I', 0x910043FF)  # add sp, sp, #0x10
-    E['mov_x0_x20']    = struct.pack('<I', 0xAA1403E0)  # mov x0, x20
-    E['mov_w1_w0']     = struct.pack('<I', 0x2A0003E1)  # mov w1, w0
-    E['mov_x2_x19']    = struct.pack('<I', 0xAA1303E2)  # mov x2, x19
-    E['ldp_19_20_sp_10'] = struct.pack('<I', 0xA94153F3) # ldp x19, x20, [sp, #0x10]
-    E['ldp_29_30_sp']  = struct.pack('<I', 0xA9407BFD)  # ldp x29, x30, [sp]
-    E['add_sp_0x20']   = struct.pack('<I', 0x910083FF)  # add sp, sp, #0x20
-    E['ret']           = struct.pack('<I', 0xD65F03C0)   # ret
-
-    # movz w0, #N lower/high for values > 16 bits
-    def mov_w0_val(val):
-        if val <= 0xFFFF:
-            return struct.pack('<I', 0x52800000 | (val << 5))  # movz w0, #val
+    # Atomic instruction helpers
+    def mov_w0_val(v):
+        if v > 0xFFFF:
+            low = v & 0xFFFF; high = (v >> 16) & 0xFFFF
+            emit_u32(0x52800000 | (low << 5))
+            emit_u32(0x72A00000 | (high << 5))
         else:
-            low = val & 0xFFFF
-            high = (val >> 16) & 0xFFFF
-            enc = bytearray()
-            enc += struct.pack('<I', 0x52800000 | (low << 5))
-            enc += struct.pack('<I', 0x72A00000 | (high << 5))  # movk w0, #high, lsl 16
-            return bytes(enc)
+            emit_u32(0x52800000 | (v << 5))
 
-    # Prologue
-    emit(E['sub_sp_0x20'])
-    emit(E['stp_29_30_sp'])
-    emit(E['add_x29_sp_0'])
-    emit(E['stp_19_20_sp_10'])
-    emit(E['mov_x19_x2'])
-    emit(E['mov_x20_x0'])
-    emit(E['sub_sp_0x10'])
+    def pushback_one():
+        """push_back one int32 from [sp] into IEntry at x0, clobbers x1,x2"""
+        emit_u32(0x910003E1)  # add x1, sp, #0
+        emit_u32(0xAA1F03E2)  # mov x2, xzr
+        emit_bl(push_back_va)
 
-    # push_back format=0x20
-    emit(mov_w0_val(0x20))
-    emit(E['str_w0_sp'])
-    emit(E['mov_x0_x19'])
-    emit(E['add_x1_sp_0'])
-    emit(E['mov_x2_xzr'])
-    emit_bl(push_back_va)
+    def push_raw16_quad(ientry_reg):
+        """push 4 int32s (0x20, w, h, 0) to IEntry in ientry_reg."""
+        # format=0x20
+        mov_w0_val(0x20)
+        emit_u32(0xB90003E0)  # str w0, [sp]
+        if ientry_reg == 'sp+0x10':
+            emit_u32(0x910043E0)  # add x0, sp, #0x10
+        else:
+            emit_u32(0xAA1303E0)  # mov x0, x19
+        pushback_one()
+        # width
+        mov_w0_val(w)
+        emit_u32(0xB90003E0)
+        if ientry_reg == 'sp+0x10':
+            emit_u32(0x910043E0)
+        else:
+            emit_u32(0xAA1303E0)
+        pushback_one()
+        # height
+        mov_w0_val(h)
+        emit_u32(0xB90003E0)
+        if ientry_reg == 'sp+0x10':
+            emit_u32(0x910043E0)
+        else:
+            emit_u32(0xAA1303E0)
+        pushback_one()
+        # direction = 0
+        emit_u32(0xB90003FF)  # str wzr, [sp]
+        if ientry_reg == 'sp+0x10':
+            emit_u32(0x910043E0)
+        else:
+            emit_u32(0xAA1303E0)
+        pushback_one()
 
-    # push_back width
-    emit(mov_w0_val(width))
-    emit(E['str_w0_sp'])
-    emit(E['mov_x0_x19'])
-    emit(E['add_x1_sp_0'])
-    emit(E['mov_x2_xzr'])
-    emit_bl(push_back_va)
+    # ─── stack: 0x80 bytes ───
+    #   sp+0x00: temp int32 (4B + padding)
+    #   sp+0x10: IEntry buffer for stream cfg (0x50 bytes, 16-aligned)
+    #   sp+0x60: x29, x30
+    #   sp+0x70: x19, x20
+    # Total: 0x80
+    emit_u32(0xD10203FF)  # sub sp, sp, #0x80
+    emit_u32(0xA90E7BFD)  # stp x29, x30, [sp, #0x60]
+    emit_u32(0xA90D53F3)  # stp x19, x20, [sp, #0x50]
+    emit_u32(0xAA0203F3)  # mov x19, x2        ; recommended IEntry* (= sp+0x90 in caller)
+    emit_u32(0xAA0003F4)  # mov x20, x0        ; IMetadata*
 
-    # push_back height
-    emit(mov_w0_val(height))
-    emit(E['str_w0_sp'])
-    emit(E['mov_x0_x19'])
-    emit(E['add_x1_sp_0'])
-    emit(E['mov_x2_xzr'])
-    emit_bl(push_back_va)
+    # ─── Part 0: inline updateAfRegions logic ───
+    # The original BL at 0x76174 called updateAfRegions() which pushes 4
+    # int32 values (0x20, 0x1100=4352, 0x990=2448, 0) then calls update().
+    # updateAfRegions itself has a use-after-free race so we inline its
+    # push_back work here instead.  Format=0x20, width=4352, height=2448.
+    mov_w0_val(0x20)
+    emit_u32(0xB90003E0)  # str w0, [sp]
+    emit_u32(0xAA1303E0)  # mov x0, x19
+    pushback_one()
+    mov_w0_val(0x1100)    # width = 4352
+    emit_u32(0xB90003E0)
+    emit_u32(0xAA1303E0)
+    pushback_one()
+    mov_w0_val(0x990)     # height = 2448
+    emit_u32(0xB90003E0)
+    emit_u32(0xAA1303E0)
+    pushback_one()
+    emit_u32(0xB90003FF)  # str wzr, [sp]      ; direction = 0
+    emit_u32(0xAA1303E0)
+    pushback_one()
 
-    # push_back input=0
-    emit(E['str_wzr_sp'])
-    emit(E['mov_x0_x19'])
-    emit(E['add_x1_sp_0'])
-    emit(E['mov_x2_xzr'])
-    emit_bl(push_back_va)
-
-    # Restore temp sp
-    emit(E['add_sp_0x10'])
-
-    # IEntry::tag() → returns tag in w0
-    emit(E['mov_x0_x19'])
+    # ─── Part 1: recommended entry (inject RAW16) ───
+    push_raw16_quad('x19')
+    emit_u32(0xAA1303E0)  # mov x0, x19
     emit_bl(tag_va)
-
-    # IMetadata::update(tag, IEntry)
-    emit(E['mov_x0_x20'])
-    emit(E['mov_w1_w0'])
-    emit(E['mov_x2_x19'])
+    emit_u32(0xAA1403E0)  # mov x0, x20
+    emit_u32(0x2A0003E1)  # mov w1, w0
+    emit_u32(0xAA1303E2)  # mov x2, x19
     emit_bl(update_va)
 
-    # Epilogue
-    emit(E['ldp_19_20_sp_10'])
-    emit(E['ldp_29_30_sp'])
-    emit(E['add_sp_0x20'])
-    emit(E['ret'])
+    # ─── Part 2: standard stream config ───
+    # entryFor(IMetadata* x20, SC, 0) → IEntry at sp+0x10 via x8
+    emit_u32(0x910043E8)  # add x8, sp, #0x10  ; return buffer
+    low = SC & 0xFFFF; high = (SC >> 16) & 0xFFFF
+    emit_u32(0x52800001 | (low << 5))           # movz w1, #low
+    if high:
+        emit_u32(0x72A00001 | (high << 5))       # movk w1, #high, lsl 16
+    emit_u32(0xAA1F03E2)  # mov w2, wzr          ; flags = 0
+    emit_u32(0xAA1403E0)  # mov x0, x20          ; IMetadata*
+    emit_bl(entry_for_va)
+
+    push_raw16_quad('sp+0x10')
+    emit_u32(0x910043E0)  # add x0, sp, #0x10
+    emit_bl(tag_va)
+    emit_u32(0xAA1403E0)  # mov x0, x20
+    emit_u32(0x2A0003E1)  # mov w1, w0
+    emit_u32(0x910043E2)  # add x2, sp, #0x10
+    emit_bl(update_va)
+    emit_u32(0x910043E0)  # add x0, sp, #0x10
+    emit_bl(ientry_dtor_va)
+
+    # ─── Epilogue ───
+    emit_u32(0xA94D53F3)  # ldp x19, x20, [sp, #0x50]
+    emit_u32(0xA94E7BFD)  # ldp x29, x30, [sp, #0x60]
+    emit_u32(0x910203FF)  # add sp, sp, #0x80
+    # Load W20 from the original PC-relative data (at VA 0x76184).
+    # The original instruction at 0x76174 was LDR W20, [PC, #16]
+    # (in 0ea09e version it was BL, but handle correctly either way)
+    ldr_pc = pc
+    ldr_offset = (0x76184 - ldr_pc)
+    ldr_imm19 = ldr_offset >> 2
+    emit_u32(0x18000000 | ((ldr_imm19 & 0x7FFFF) << 5) | 20)  # ldr w20, [pc, #imm]
+    b_pc = pc
+    b_imm26 = (0x76178 - b_pc) >> 2
+    emit_u32(0x14000000 | (b_imm26 & 0x3FFFFFF))  # b #0x76178
 
     return bytes(code)
+
+
+def _find_rx_load(data):
+    """Find the RX (executable) LOAD segment. Returns (idx, offset, vaddr, filesz, memsz)."""
+    phoff = struct.unpack_from('<Q', data, 0x20)[0]
+    phnum = struct.unpack_from('<H', data, 0x38)[0]
+    phentsize = struct.unpack_from('<H', data, 0x36)[0]
+
+    for i in range(phnum):
+        ph = data[phoff + i * phentsize : phoff + (i+1) * phentsize]
+        p_type = struct.unpack_from('<I', ph, 0)[0]
+        if p_type == PT_LOAD:
+            p_flags = struct.unpack_from('<I', ph, 4)[0]
+            p_offset = struct.unpack_from('<Q', ph, 8)[0]
+            p_vaddr = struct.unpack_from('<Q', ph, 16)[0]
+            p_filesz = struct.unpack_from('<Q', ph, 32)[0]
+            p_memsz = struct.unpack_from('<Q', ph, 40)[0]
+            if p_flags & 1:
+                return i, p_offset, p_vaddr, p_filesz, p_memsz
+    raise RuntimeError("No executable LOAD segment found")
 
 
 def patch_metastore_raw16(in_path, out_path, dry_run=False, raw16_res=(4352, 2448)):
     """
     Patch libmtkcam_metastore.so to inject RAW16 entries into the
-    recommended stream configurations layout.
+    recommended stream configurations layout via an ELF trampoline.
 
-    Addresses (stock libmtkcam_metastore.so for A75):
-      patch_va    = 0x76174  (BL to IMetadata::update)
-      tramp_va    = 0x761d4  (gap after __stack_chk_fail, overwrites updateAfRegions)
-      push_back   = 0xab110  (IEntry::push_back(int))
-      tag_fn      = 0xab0c0  (IEntry::tag)
-      update_fn   = 0xab0d0  (IMetadata::update)
+    The trampoline is placed at the end of the executable LOAD segment,
+    extending it so no existing code is overwritten.
     """
     with open(in_path, 'rb') as f:
         data = bytearray(f.read())
 
     width, height = raw16_res
 
-    # Fixed addresses for stock A75 libmtkcam_metastore.so
+    # Hardcoded VA for stock A75 libmtkcam_metastore.so
     patch_va    = 0x76174
-    tramp_va    = 0x761d4
-    push_back   = 0xab110
-    tag_fn      = 0xab0c0
-    update_fn   = 0xab0d0
+    push_back   = 0xab110     # IEntry::push_back(int32)
+    tag_fn      = 0xab0c0     # IEntry::tag()
+    update_fn   = 0xab0d0     # IMetadata::update()
+    entry_for   = 0xab140     # IMetadata::entryFor(tag, flags)
+    ientry_dtor = 0xab100     # IEntry::~IEntry()
 
-    # Verify: original bytes at patch point should be BL to update
-    orig_bytes = bytes(data[patch_va:patch_va+4])
-    print(f"Patch point 0x{patch_va:x}: current bytes = {orig_bytes.hex()}")
+    # Parse ELF to find safe trampoline location at end of RX LOAD
+    load2_idx, load2_offset, load2_vaddr, load2_filesz, load2_memsz = \
+        _find_rx_load(data)
+    tramp_va = load2_vaddr + load2_filesz  # right after last mapped byte
+    # Convert VAs to file offsets for accessing data[]
+    patch_file_off  = patch_va - load2_vaddr + load2_offset
+    tramp_file_off  = load2_offset + load2_filesz
 
+    print(f"Executable LOAD: VA 0x{load2_vaddr:x}-0x{tramp_va:x} "
+          f"(size 0x{load2_filesz:x})")
+
+    # Build the trampoline
     trampoline = make_metastore_raw16_trampoline(
-        tramp_va, push_back, tag_fn, update_fn, (width, height))
+        tramp_va, push_back, tag_fn, update_fn,
+        entry_for, ientry_dtor, (width, height))
+    tramp_len = len(trampoline)
+    new_filesz = load2_filesz + tramp_len
+    new_memsz = max(load2_memsz, new_filesz)
 
-    print(f"Trampoline: {len(trampoline)} bytes at VA 0x{tramp_va:x} → 0x{tramp_va + len(trampoline):x}")
+    print(f"Trampoline: {tramp_len} bytes at VA 0x{tramp_va:x} → 0x{tramp_va + tramp_len:x}")
 
     # Verify BL targets in trampoline
-    for off in range(0, len(trampoline), 4):
+    name_map = {
+        push_back: 'push_back', tag_fn: 'tag()', update_fn: 'update()',
+        entry_for: 'entryFor', ientry_dtor: '~IEntry()',
+    }
+    for off in range(0, tramp_len, 4):
         insn = struct.unpack_from('<I', trampoline, off)[0]
         if (insn & 0xFC000000) == 0x94000000:
             imm26 = insn & 0x3FFFFFF
             if imm26 & (1 << 25):
                 imm26 -= (1 << 26)
             tgt = (tramp_va + off) + imm26 * 4
-            name = {push_back: 'push_back', tag_fn: 'tag()', update_fn: 'update()'}.get(tgt, 'UNKNOWN')
+            name = name_map.get(tgt, f'0x{tgt:x}')
             print(f"  BL at 0x{tramp_va+off:x} → 0x{tgt:x} ({name})")
 
-    # Write trampoline
-    data[tramp_va:tramp_va + len(trampoline)] = trampoline
+    # Verify: original bytes at patch point (using file offset)
+    orig_bytes = bytes(data[patch_file_off:patch_file_off+4])
+    print(f"Patch point VA 0x{patch_va:x} (file offset 0x{patch_file_off:x}): "
+          f"current bytes = {orig_bytes.hex()}")
 
-    # Patch BL at call site to redirect to trampoline
+    # Extend file and write trampoline (using file offset)
+    needed = tramp_file_off + tramp_len - len(data)
+    if needed > 0:
+        data.extend(b'\x00' * needed)
+    data[tramp_file_off:tramp_file_off + tramp_len] = trampoline
+
+    # Update RX LOAD segment header
+    phoff = struct.unpack_from('<Q', data, 0x20)[0]
+    phentsize = struct.unpack_from('<H', data, 0x36)[0]
+    ph_off = phoff + load2_idx * phentsize
+    struct.pack_into('<Q', data, ph_off + 32, new_filesz)
+    struct.pack_into('<Q', data, ph_off + 40, new_memsz)
+    print(f"  Extended LOAD p_filesz: 0x{load2_filesz:x} → 0x{new_filesz:x}")
+    print(f"  Extended LOAD p_memsz:  0x{load2_memsz:x} → 0x{new_memsz:x}")
+
+    # Patch BL at call site to redirect to trampoline (VAs, not file offsets)
     new_bl = bl_encode(patch_va, tramp_va)
-    data[patch_va:patch_va+4] = new_bl
-    print(f"Patched BL at 0x{patch_va:x}: {orig_bytes.hex()} → {new_bl.hex()}")
+    data[patch_file_off:patch_file_off+4] = new_bl
+    print(f"Patched BL at VA 0x{patch_va:x} (file off 0x{patch_file_off:x}): "
+          f"{orig_bytes.hex()} → {new_bl.hex()}")
+
+    # NOP updateAfRegions at VA 0x761d4 to work around a use-after-free race
+    # (FORTIFY: pthread_mutex_lock on destroyed mutex).
+    # Replace first instruction with RET (0xD65F03C0).
+    nop_va = 0x761d4
+    nop_file_off = nop_va - load2_vaddr + load2_offset
+    orig_nop = bytes(data[nop_file_off:nop_file_off+4])
+    data[nop_file_off:nop_file_off+4] = struct.pack('<I', 0xD65F03C0)
+    print(f"NOP'd updateAfRegions at VA 0x{nop_va:x}: {orig_nop.hex()} → d65f03c0 (ret)")
 
     # Write output
     if dry_run:
@@ -394,6 +489,7 @@ def patch_metastore_raw16(in_path, out_path, dry_run=False, raw16_res=(4352, 244
             f.write(data)
         print(f"\n✓ Patched metastore written to {out_path}")
     print(f"  RAW16 resolution: {width}×{height}")
+    print(f"  File size: {len(data)} bytes")
 
 
 # ─── ELF patching (3rdparty mode) ────────────────────────────────────

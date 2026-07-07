@@ -125,12 +125,17 @@ def _metastore_raw16_actionable(cfg):
     return bool(cfg)
 
 
-def _preloader_gz_args(cfg):
-    return []
+def _preloader_args(cfg):
+    a = []
+    if cfg.get('gz'):
+        a += ['--gz']
+    if cfg.get('usb_dl'):
+        a += ['--usb-dl']
+    return a
 
 
-def _preloader_gz_actionable(cfg):
-    return bool(cfg)
+def _preloader_actionable(cfg):
+    return bool(cfg.get('gz') or cfg.get('usb_dl'))
 
 
 PARTS = {
@@ -144,10 +149,10 @@ PARTS = {
                      tool='patch_gpufreq.py',
                      args=_gpufreq_args, actionable=_gpufreq_actionable),
     'metastore': dict(inp='libmtkcam_metastore.so',
-                      out='{dev}-libmtkcam_metastore.so',
-                      tool='patch_raw_capability.py',
-                      args=_metastore_args, actionable=_metastore_actionable),
-    'metastore_raw16': dict(inp='libmtkcam_metastore.so',
+                     out='{dev}-libmtkcam_metastore.so',
+                     tool='patch_raw_capability.py',
+                     args=_metastore_args, actionable=_metastore_actionable),
+    'metastore_raw16': dict(inp='{dev}-libmtkcam_metastore.so',
                             out='{dev}-libmtkcam_metastore.so',
                             tool='patch_raw_3rdparty.py',
                             args=_metastore_raw16_args,

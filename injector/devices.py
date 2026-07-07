@@ -825,21 +825,23 @@ DEVICES = [
             # dynamic trampoline in the PLT[0] cave (see patch_raw_capability.py).
             # Sensible for this device; adjust tier for others as needed.
             'metastore': {
-                'tier': 'RAW,MANUAL_SENSOR',
+                'tier': 'RAW,MANUAL_SENSOR,MANUAL_POST_PROCESSING',
                 'allow_replace': False,   # fallback to single-slot when no BIND_NOW
             },
             # Inject RAW16 entries into recommended stream configurations
             # via an AArch64 trampoline in updateRecommendedStreamConfiguration.
             'metastore_raw16': {
-                'width': 4352,
-                'height': 2448,
+                'width': 4080,
+                'height': 3072,
             },
             # Patch libmtkcam_3rdparty.customer.so to add raw/DNG scenario
             # feature bits (bit 35 + 36) at the vendor metadata tag check.
             '3rdparty': True,
-            # Patch preloader to skip GenieZone (GZ) init — one-byte
-            # binary edit; avoids the GPT-based disable-gz approach.
-            'preloader_gz': True,
+            # Preloader patches — opt in to each independently via sub-keys.
+            'preloader': {
+                'gz': True,        # Skip GenieZone init (BEQ -> B in gz_release_all)
+                'usb_dl': True,    # Force USB DL mode always-on (CBZ -> NOP in usb_dl_init)
+            },
             'gpt': {
                 'storage': 'ufs',
                 'disk_size': 511839305728,
