@@ -343,38 +343,75 @@ def check_bind_now(data: bytes) -> bool:
 
 # ── Cave / trampoline ─────────────────────────────────────────────────────────
 
+def find_rx_load(data: bytes) -> tuple | None:
+    """Find executable PT_LOAD segment.
+    Returns (seg_index, p_offset, p_vaddr, p_filesz, p_memsz) or None.
+    """
+    e_phoff     = struct.unpack_from('<Q', data, 0x20)[0]
+    e_phentsize = struct.unpack_from('<H', data, 0x36)[0]
+    e_phnum     = struct.unpack_from('<H', data, 0x38)[0]
+    for i in range(e_phnum):
+        off = e_phoff + i * e_phentsize
+        p_type  = struct.unpack_from('<I', data, off)[0]
+        p_flags = struct.unpack_from('<I', data, off + 4)[0]
+        if p_type == 1 and (p_flags & 1):
+            p_offset = struct.unpack_from('<Q', data, off + 8)[0]
+            p_vaddr  = struct.unpack_from('<Q', data, off + 16)[0]
+            p_filesz = struct.unpack_from('<Q', data, off + 32)[0]
+            p_memsz  = struct.unpack_from('<Q', data, off + 40)[0]
+            return (i, p_offset, p_vaddr, p_filesz, p_memsz)
+    return None
+
+
 def find_cave(data: bytes, sections: dict, load_segments: list, need_bytes: int = 36):
     """
     Find a safe executable cave for the trampoline.
 
-    Uses the zero gap between .text end and .plt start (12 bytes) plus the
-    dead PLT[0] resolver stub (32 bytes).  PLT[0] is never called at runtime
-    when BIND_NOW is set; overwriting it is safe.
+    First tries the zero gap between .text end and .plt start (12 bytes) plus
+    the dead PLT[0] resolver stub (32 bytes).  PLT[0] is never called at
+    runtime when BIND_NOW is set; overwriting it is safe.
 
-    Returns (cave_va, cave_file_off, available_size) or None.
+    If that is too small, extends the executable LOAD segment (same approach as
+    patch_raw_3rdparty.py — claims the gap before the next segment).
+
+    Returns dict with:
+      'va': cave VA
+      'file_off': cave file offset
+      'available': available bytes
+      'extend': bool — True if LOAD segment must be extended
+    or None.
     """
     text = sections.get('.text')
     plt  = sections.get('.plt')
-    if not text or not plt:
+    if text and plt:
+        text_end_off  = text['offset'] + text['size']
+        plt_start_off = plt['offset']
+
+        if plt_start_off > text_end_off:
+            gap       = plt_start_off - text_end_off
+            available = gap + PLT0_SIZE
+            cave_va = offset_to_va(text_end_off, load_segments)
+            if cave_va is not None and available >= need_bytes:
+                return {'va': cave_va, 'file_off': text_end_off,
+                        'available': available, 'extend': False}
+
+    # Fallback: extend executable LOAD segment (like patch_raw_3rdparty.py)
+    rx = find_rx_load(data)
+    if rx is None:
         return None
+    idx, p_offset, p_vaddr, p_filesz, p_memsz = rx
 
-    text_end_off  = text['offset'] + text['size']
-    plt_start_off = plt['offset']
+    e_phoff     = struct.unpack_from('<Q', data, 0x20)[0]
+    e_phentsize = struct.unpack_from('<H', data, 0x36)[0]
+    ph_off      = e_phoff + idx * e_phentsize
 
-    if plt_start_off <= text_end_off:
-        return None
+    cave_va       = p_vaddr + p_filesz
+    cave_file_off = p_offset + p_filesz
 
-    gap       = plt_start_off - text_end_off
-    available = gap + PLT0_SIZE   # gap + dead PLT[0]
-
-    if available < need_bytes:
-        return None
-
-    cave_va = offset_to_va(text_end_off, load_segments)
-    if cave_va is None:
-        return None
-
-    return (cave_va, text_end_off, available)
+    return {'va': cave_va, 'file_off': cave_file_off,
+            'available': need_bytes, 'extend': True,
+            'ph_off': ph_off, 'p_offset': p_offset,
+            'old_filesz': p_filesz, 'old_memsz': p_memsz}
 
 
 def build_tier_cave(cave_va: int, push_back_va: int,
@@ -507,6 +544,10 @@ def patch_file(path: Path, patches: list[tuple[int, bytes]], dry_run: bool) -> b
         return True
 
     data = bytearray(path.read_bytes())
+    # Extend file if any patch falls beyond current end
+    max_end = max((off + len(b)) for off, b in patches) if patches else 0
+    if max_end > len(data):
+        data.extend(b'\x00' * (max_end - len(data)))
     for off, b in patches:
         data[off:off+len(b)] = b
     path.write_bytes(bytes(data))
@@ -549,9 +590,12 @@ def do_append(path: Path, data: bytes, sym: dict, load_segments: list,
 
     cave = find_cave(data, sections, load_segments, need_bytes=36)
     if cave is None:
-        print(f"  {sensor_name}: [SKIP] no suitable cave found (need 36B near .text/.plt gap)")
+        print(f"  {sensor_name}: [SKIP] no suitable cave found (need 36B)")
         return
-    cave_va, cave_off, cave_avail = cave
+    cave_va      = cave['va']
+    cave_off     = cave['file_off']
+    cave_avail   = cave['available']
+    extend       = cave.get('extend', False)
 
     slot_off, slot_val = slot
     call_off = slot_off + 16   # call push_back is always 4 instructions after movz
@@ -591,8 +635,7 @@ def do_append(path: Path, data: bytes, sym: dict, load_segments: list,
     print(f"    slot 0x{call_va - 16:x}: cap={slot_val} ({CAP_NAMES.get(slot_val,'?')})")
     print(f"    push_back PLT: 0x{push_back_va:x}")
     print(f"    trampoline: call@0x{call_va:x} -> bl cave@0x{cave_va:x}")
-    print(f"    cave: 36B at file 0x{cave_off:x}..0x{cave_off+36:x}  "
-          f"(avail {cave_avail}B)")
+    print(f"    cave: {cave_avail}B at file 0x{cave_off:x}  (extend={extend})")
     if old_b_to_cave:
         print(f"    repair: old B cave callsite will become BL cave")
 
@@ -608,7 +651,16 @@ def do_append(path: Path, data: bytes, sym: dict, load_segments: list,
 
     cave_code = build_append_cave(cave_va, push_back_va, CAP_BURST_CAPTURE)
     patches.append((cave_off, cave_code))
-    print(f"    patch[2]: cave  {cave_code.hex()}")
+    print(f"    patch[2]: cave ({len(cave_code)}B) → {cave_code.hex()}")
+
+    if extend:
+        new_filesz = cave['old_filesz'] + len(cave_code)
+        new_memsz  = max(cave['old_memsz'], new_filesz)
+        ph_off = cave['ph_off']
+        patches.append((ph_off + 32, struct.pack('<Q', new_filesz)))
+        patches.append((ph_off + 40, struct.pack('<Q', new_memsz)))
+        print(f"    patch[3]: LOAD p_filesz 0x{cave['old_filesz']:x} → 0x{new_filesz:x}")
+        print(f"    patch[4]: LOAD p_memsz  0x{cave['old_memsz']:x} → 0x{new_memsz:x}")
 
     patch_file(path, patches, dry_run)
 
@@ -721,11 +773,15 @@ def do_ensure_tier(path: Path, data: bytes, sym: dict, load_segments: list,
     trampoline_ok = False
     push_back_va = None
     call_off = call_va = cave = None
+    extend = False
 
     if check_bind_now(data):
         cave = find_cave(data, sections, load_segments, need_bytes=needed)
         if cave:
-            cave_va, cave_off, cave_avail = cave
+            cave_va    = cave['va']
+            cave_off   = cave['file_off']
+            cave_avail = cave['available']
+            extend     = cave.get('extend', False)
             call_off = slot_off + 16
             call_va  = offset_to_va(call_off, load_segments)
 
@@ -760,7 +816,17 @@ def do_ensure_tier(path: Path, data: bytes, sym: dict, load_segments: list,
 
         cave_code = build_tier_cave(cave_va, push_back_va, remaining)
         patches.append((cave_off, cave_code))
-        print(f"    patch[2]: cave ({len(cave_code)}B) → {cave_code.hex()}")
+        print(f"    patch[2]: cave ({len(cave_code)}B) → {cave_code.hex()}  "
+              f"(extend={extend}, avail={cave['available']}B)")
+
+        if extend:
+            new_filesz = cave['old_filesz'] + len(cave_code)
+            new_memsz  = max(cave['old_memsz'], new_filesz)
+            ph_off = cave['ph_off']
+            patches.append((ph_off + 32, struct.pack('<Q', new_filesz)))
+            patches.append((ph_off + 40, struct.pack('<Q', new_memsz)))
+            print(f"    patch[3]: LOAD p_filesz 0x{cave['old_filesz']:x} → 0x{new_filesz:x}")
+            print(f"    patch[4]: LOAD p_memsz  0x{cave['old_memsz']:x} → 0x{new_memsz:x}")
 
         patch_file(path, patches, dry_run)
         return
