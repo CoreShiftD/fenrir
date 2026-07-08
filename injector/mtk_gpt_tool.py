@@ -644,9 +644,20 @@ def cmd_generate(args):
     partitions = parse_scatter(args.scatter, args.storage)
     sector_size = args.sector_size or (4096 if args.storage.lower() == "ufs" else 512)
     disk_bytes = parse_size(args.disk_size)
+    total_lba = disk_bytes // sector_size
     resolved = resolve_layout(partitions, disk_bytes, sector_size)
     num_entries = args.num_entries or len(resolved)
     pgpt_region_lba, sgpt_region_lba = get_reserved_region_sizes(partitions, sector_size)
+
+    if args.disable_gz:
+        gz_names = {"gz_a", "gz_b", "gz1", "gz2"}
+        for r in resolved:
+            if r.name in gz_names:
+                size_lba = r.last_lba - r.first_lba + 1
+                print(f"  {r.name}: {r.first_lba:#x}..{r.last_lba:#x} -> "
+                      f"{total_lba:#x}..{total_lba + size_lba - 1:#x}")
+                r.first_lba = total_lba
+                r.last_lba = total_lba + size_lba - 1
 
     pgpt, sgpt = generate_gpt_images(resolved, disk_bytes, sector_size, num_entries=num_entries,
                                       pgpt_region_lba=pgpt_region_lba, sgpt_region_lba=sgpt_region_lba,
@@ -836,8 +847,10 @@ def main():
                     help="Override firstUsableLBA header field. Some vendor tools "
                          "hardcode 34 (the classic 512-byte-sector GPT constant) "
                          "even on 4096-byte-sector disks; set this to match exactly.")
+    g.add_argument("--disable-gz", action="store_true",
+                     help="Place gz_a/gz_b entries beyond disk capacity (disable GenieZone)")
     g.add_argument("--output-suffix", default="",
-                    help="Suffix before .img, e.g. _gen → PGPT_gen.img")
+                     help="Suffix before .img, e.g. _gen → PGPT_gen.img")
     g.add_argument("--out-dir", default="./out")
     g.set_defaults(func=cmd_generate)
 

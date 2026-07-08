@@ -274,11 +274,11 @@ def main():
                     return rc
             ran.append(('gpt', os.path.join(out, 'PGPT_gen.img') + ', SGPT_gen.img'))
 
-        # --- GenieZone disable (patching existing PGPT/SGPT) ---
+        # --- GenieZone disable on top of generated GPT ---
         if gpt_cfg.get('disable_geniezone'):
-            pgpt = gpt_cfg.get('pgpt') or os.path.join(args.in_dir, 'PGPT.img')
+            pgpt = os.path.join(out, 'PGPT_gen.img')
             if not os.path.exists(pgpt):
-                skipped.append(('gpt:disable-gz', f"PGPT not found at {pgpt}"))
+                skipped.append(('gpt:disable-gz', f"generated PGPT not found at {pgpt}"))
             else:
                 cmd_disable = [py, os.path.join(HERE, 'mtk_gpt_tool.py'), 'disable-gz',
                                '--device', dev.name.lower(), '--pgpt', pgpt,
