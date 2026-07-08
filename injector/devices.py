@@ -832,7 +832,7 @@ DEVICES = [
             # dynamic trampoline in the PLT[0] cave (see patch_raw_capability.py).
             # Sensible for this device; adjust tier for others as needed.
             'metastore': {
-                'tier': 'RAW,MANUAL_SENSOR,MANUAL_POST_PROCESSING',
+                'tier': 'RAW,MANUAL_SENSOR,MANUAL_POST_PROCESSING,BURST_CAPTURE,PRIVATE_REPROCESSING,HIGH_SPEED_VIDEO',
                 'allow_replace': False,   # fallback to single-slot when no BIND_NOW
             },
             # Inject RAW16 entries into recommended stream configurations
