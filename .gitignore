@@ -9,3 +9,5 @@ payload/build/
 settings.json
 bin/*.raw
 bin/*.so
+*.so
+stock_libmtkcam_metastore.so
